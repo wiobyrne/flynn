@@ -13,7 +13,8 @@ import yaml
 import logging
 import asyncio
 import httpx
-from datetime import date, datetime
+from datetime import date, datetime, time as dtime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from dotenv import load_dotenv
 from telegram import Update
@@ -41,6 +42,9 @@ DOMAINS = {d["id"]: d for d in config["domains"]}
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # only respond to your chat
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+TIMEZONE = ZoneInfo(config.get("timezone", "America/New_York"))
+CHECKIN_STATE: dict[int, str] = {}  # chat_id → "morning" | "evening"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -228,6 +232,94 @@ def update_domain_frontmatter(domain_id: str, field: str, value: str) -> bool:
     return True
 
 
+# ── Daily Notes ───────────────────────────────────────────────────────────────
+
+DAILY_NOTES_ROOT = VAULT / "03 CREATE" / "Journal" / "Daily"
+
+MORNING_PROMPT = (
+    "🌅 *Morning check-in*\n\n"
+    "1\\. How are you feeling? \\(1–5\\)\n"
+    "2\\. Three things you're grateful for\n"
+    "3\\. What would make today great?\n\n"
+    "_Reply with anything — I'll save it to today's note\\._"
+)
+
+EVENING_PROMPT = (
+    "🌙 *Evening check-in*\n\n"
+    "1\\. How was today? \\(1–5\\)\n"
+    "2\\. Highlights of the day\n"
+    "3\\. What did you learn?\n\n"
+    "_Reply with anything — I'll save it to today's note\\._"
+)
+
+
+def get_daily_note_path(d: date) -> Path:
+    return DAILY_NOTES_ROOT / d.strftime("%Y/%m") / f"{d.strftime('%Y-%m-%d')}.md"
+
+
+def create_daily_note_if_missing(d: date) -> Path:
+    path = get_daily_note_path(d)
+    if path.exists():
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    date_str = d.strftime("%Y-%m-%d")
+    yesterday = (d.replace(day=d.day - 1) if d.day > 1 else d).strftime("%Y-%m-%d")
+    tomorrow_date = date(d.year, d.month, d.day)
+    week_str = d.strftime("%G-W%V")
+    content = f"""---
+tags:
+  - daily-note
+date: {date_str}
+week: {week_str}
+---
+
+# {date_str}
+
+## Today
+
+```tasks
+not done
+(due on {date_str}) OR (scheduled on {date_str})
+short mode
+```
+
+## Tasks Quick Add
+- [ ]
+
+---
+
+## Morning Check-in
+
+
+
+---
+
+## Evening Check-in
+
+
+
+---
+
+## Notes
+
+"""
+    path.write_text(content)
+    return path
+
+
+def write_checkin_to_note(d: date, section: str, response: str) -> None:
+    """Write a check-in response to the appropriate section of the daily note."""
+    path = create_daily_note_if_missing(d)
+    content = path.read_text()
+    marker = f"## {section} Check-in\n"
+    if marker in content:
+        timestamp = datetime.now(TIMEZONE).strftime("%H:%M")
+        entry = f"{marker}\n*{timestamp}*\n{response}\n"
+        content = content.replace(marker + "\n\n", entry, 1)
+        content = content.replace(marker + "\n", entry, 1)
+        path.write_text(content)
+
+
 # ── Security: only respond to your own chat ──────────────────────────────────
 
 def is_allowed(update: Update) -> bool:
@@ -373,7 +465,41 @@ async def cmd_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
+    chat_id = update.effective_chat.id
+    # Check if we're waiting for a check-in response
+    if chat_id in CHECKIN_STATE:
+        section = CHECKIN_STATE.pop(chat_id)
+        write_checkin_to_note(date.today(), section, update.message.text)
+        path = get_daily_note_path(date.today())
+        await update.message.reply_text(
+            f"✓ Saved to *{section} check-in* in today's note.",
+            parse_mode="Markdown",
+        )
+        return
     await _capture(update, update.message.text)
+
+
+async def scheduled_morning_checkin(ctx) -> None:
+    if not ALLOWED_CHAT_ID:
+        return
+    create_daily_note_if_missing(date.today())
+    CHECKIN_STATE[int(ALLOWED_CHAT_ID)] = "Morning"
+    await ctx.bot.send_message(
+        chat_id=int(ALLOWED_CHAT_ID),
+        text=MORNING_PROMPT,
+        parse_mode="MarkdownV2",
+    )
+
+
+async def scheduled_evening_checkin(ctx) -> None:
+    if not ALLOWED_CHAT_ID:
+        return
+    CHECKIN_STATE[int(ALLOWED_CHAT_ID)] = "Evening"
+    await ctx.bot.send_message(
+        chat_id=int(ALLOWED_CHAT_ID),
+        text=EVENING_PROMPT,
+        parse_mode="MarkdownV2",
+    )
 
 
 async def _capture(update: Update, text: str) -> None:
@@ -402,6 +528,28 @@ def main() -> None:
     app.add_handler(CommandHandler("focus", cmd_focus))
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Schedule check-ins
+    checkins = config.get("checkins", {})
+    jq = app.job_queue
+
+    if checkins.get("morning", {}).get("enabled", False):
+        h, m = map(int, checkins["morning"]["time"].split(":"))
+        jq.run_daily(
+            scheduled_morning_checkin,
+            time=dtime(h, m, tzinfo=TIMEZONE),
+            name="morning_checkin",
+        )
+        log.info(f"Morning check-in scheduled at {h:02d}:{m:02d} {config.get('timezone')}")
+
+    if checkins.get("evening", {}).get("enabled", False):
+        h, m = map(int, checkins["evening"]["time"].split(":"))
+        jq.run_daily(
+            scheduled_evening_checkin,
+            time=dtime(h, m, tzinfo=TIMEZONE),
+            name="evening_checkin",
+        )
+        log.info(f"Evening check-in scheduled at {h:02d}:{m:02d} {config.get('timezone')}")
 
     log.info("Bot polling...")
     app.run_polling(drop_pending_updates=True)

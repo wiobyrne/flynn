@@ -5,6 +5,19 @@ vault_path: "~/Documents/your-obsidian-vault"
 
 default_domain: "build"
 
+# Your local timezone — used for scheduling check-ins
+# Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+timezone: "America/New_York"
+
+# Daily check-ins — Flynn prompts you and writes responses to your daily note
+checkins:
+  morning:
+    time: "07:00"   # 24h format
+    enabled: true
+  evening:
+    time: "17:30"
+    enabled: true
+
 ollama:
   url: "http://localhost:11434"
   model: "llama3.1:8b"   # any model from `ollama list`
