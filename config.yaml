@@ -1,0 +1,94 @@
+# Flynn — Personal AI Assistant Bot
+# Copy this file and update the values for your setup
+
+vault_path: "~/Documents/your-obsidian-vault"
+
+default_domain: "build"
+
+ollama:
+  url: "http://localhost:11434"
+  model: "llama3.1:8b"   # any model from `ollama list`
+
+# Add or remove domains to match your life areas
+domains:
+  - id: self
+    label: "Self"
+    emoji: "🏃"
+    description: "health, mental wellness, physical fitness, exercise, sleep, therapy, personal growth"
+    keywords:
+      - health
+      - mental
+      - physical
+      - exercise
+      - sleep
+      - therapy
+      - wellness
+      - doctor
+      - gym
+      - run
+      - diet
+      - workout
+      - meditation
+
+  - id: family
+    label: "Family"
+    emoji: "👨‍👩‍👧"
+    description: "marriage, relationship, home life, family commitments, household tasks"
+    keywords:
+      - family
+      - marriage
+      - spouse
+      - partner
+      - kids
+      - relationship
+      - home
+      - house
+      - household
+
+  - id: vocation
+    label: "Vocation"
+    emoji: "🎓"
+    description: "teaching, research, academic writing, students, publications, conferences"
+    keywords:
+      - teaching
+      - research
+      - academic
+      - college
+      - university
+      - students
+      - class
+      - paper
+      - publication
+      - conference
+
+  - id: build
+    label: "Build"
+    emoji: "🔨"
+    description: "newsletter, blog, courses, business, speaking, revenue, content creation"
+    keywords:
+      - newsletter
+      - blog
+      - post
+      - course
+      - business
+      - revenue
+      - speaking
+      - content
+      - youtube
+      - social
+
+  - id: infrastructure
+    label: "Infrastructure"
+    emoji: "🖥️"
+    description: "homelab, servers, Obsidian vault, AI workflow, automation"
+    keywords:
+      - homelab
+      - server
+      - obsidian
+      - vault
+      - ollama
+      - docker
+      - linux
+      - automation
+      - backup
+      - network
