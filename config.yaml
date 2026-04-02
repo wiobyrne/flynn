@@ -1,18 +1,18 @@
-# Flynn — Personal AI Assistant Bot
-# Copy this file and update the values for your setup
+# Personal Assistant Bot — Configuration
 
-vault_path: "~/Documents/your-obsidian-vault"
+vault_path: "/home/wiobyrne/Documents/wiobyrne"
 
-default_domain: "build"
+default_domain: "self"
 
-# Your local timezone — used for scheduling check-ins
-# Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
 timezone: "America/New_York"
 
-# Daily check-ins — Flynn prompts you and writes responses to your daily note
+briefing:
+  time: "07:00"
+  enabled: true
+
 checkins:
   morning:
-    time: "07:00"   # 24h format
+    time: "07:05"
     enabled: true
   evening:
     time: "17:30"
@@ -20,14 +20,13 @@ checkins:
 
 ollama:
   url: "http://localhost:11434"
-  model: "llama3.1:8b"   # any model from `ollama list`
+  model: "llama3.1:8b"   # change to qwen2.5-coder:7b or any installed model
 
-# Add or remove domains to match your life areas
 domains:
   - id: self
     label: "Self"
     emoji: "🏃"
-    description: "health, mental wellness, physical fitness, exercise, sleep, therapy, personal growth"
+    description: "health, mental wellness, physical fitness, exercise, sleep, therapy, personal growth, reading for pleasure"
     keywords:
       - health
       - mental
@@ -41,7 +40,27 @@ domains:
       - run
       - diet
       - workout
+      - working out
+      - work out
+      - walk
+      - bike
+      - yoga
       - meditation
+      - mindfulness
+      - stress
+      - anxiety
+      - anxious
+      - depression
+      - mental health
+      - therapy
+      - tired
+      - exhausted
+      - energy
+      - water
+      - nutrition
+      - doctor
+      - appointment
+      - Brighid
 
   - id: family
     label: "Family"
@@ -57,11 +76,13 @@ domains:
       - home
       - house
       - household
+      - anniversary
+      - date night
 
   - id: vocation
     label: "Vocation"
     emoji: "🎓"
-    description: "teaching, research, academic writing, students, publications, conferences"
+    description: "teaching, research, academic writing, College of Charleston, students, publications, conferences"
     keywords:
       - teaching
       - research
@@ -70,14 +91,24 @@ domains:
       - university
       - students
       - class
+      - course
       - paper
       - publication
       - conference
+      - faculty
+      - department
+      - dissertation
+      - grades
+      - grading
+      - STEAM
+      - feedback
+      - syllabus
+      - assignment
 
   - id: build
     label: "Build"
     emoji: "🔨"
-    description: "newsletter, blog, courses, business, speaking, revenue, content creation"
+    description: "newsletter, blog, courses, business, speaking, revenue, content creation, YouTube, social media"
     keywords:
       - newsletter
       - blog
@@ -89,19 +120,27 @@ domains:
       - content
       - youtube
       - social
+      - digitally literate
+      - wiobyrne
+      - buttondown
+      - wordpress
 
   - id: infrastructure
     label: "Infrastructure"
     emoji: "🖥️"
-    description: "homelab, servers, Obsidian vault, AI workflow, automation"
+    description: "homelab, Proxmox, TrueNAS, Obsidian vault, Ollama, AI workflow, servers, automation"
     keywords:
       - homelab
+      - proxmox
+      - truenas
       - server
       - obsidian
       - vault
       - ollama
       - docker
       - linux
+      - plex
+      - jellyfin
       - automation
       - backup
       - network
