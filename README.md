@@ -145,12 +145,13 @@ sudo systemctl start flynn
 
 | Command | Description |
 |---------|-------------|
-| `/today` | Morning briefing — domain status and next actions |
+| `/today` | Morning briefing — domain status, next actions, overdue flags |
 | `/status` | Bar chart of open tasks per domain |
 | `/list [domain]` | Show open tasks, optionally filtered by domain |
 | `/done` | Pick a task to mark complete from a numbered list |
 | `/done <text>` | Mark a matching task complete by partial text |
 | `/focus <domain> <text>` | Set next action on a domain note |
+| `/week` | Weekly digest — stats per domain + creates weekly note in vault |
 | `/add <text>` | Explicit task capture (bypasses intent detection) |
 | `/journal <text>` | Save a note directly to today's daily note |
 | Any text | Auto-routed — task or reflection detected automatically |
@@ -230,7 +231,33 @@ Local Ollama routing = $0. Claude API fallback uses `claude-haiku` (cheapest mod
 - [Bases](https://obsidian.md/bases) — for the Flynn dashboard (core plugin, Obsidian 1.8+)
 - [Dataview](https://obsidian.md/plugins?id=dataview) — optional, for status callouts in domain notes
 
+## FLYNN.md — persistent identity
+
+Create `04 META/🤖 Agents/assistant/FLYNN.md` in your vault to give Flynn persistent context. Flynn reads this file on startup and uses the `## Current Focus` section in every briefing. Edit it like any other note — no code changes needed.
+
+```markdown
+## Current Focus
+- Launching the new site this week
+- Getting class grades submitted
+
+## Notes for Flynn
+- "Brighid" routes to family domain
+- "initiated" routes to build domain
+```
+
+## Weekly notes
+
+Flynn creates weekly notes at `03 CREATE/Journal/Weekly/YYYY-WXX.md` with a domain summary table, overdue task list, and reflection prompts. These are created automatically every Friday at 5pm, or on demand with `/week`.
+
 ## Changelog
+
+### v0.4
+- FLYNN.md identity file — Flynn reads persistent context from your vault
+- Overdue task detection — tasks older than 7 days flagged in every briefing
+- Weekly digest — domain stats, overdue tasks, weekly note created in vault
+- `/week` command for on-demand weekly review
+- Friday auto-digest at configurable time (default 5pm)
+- Briefing logic consolidated (shared between /today and auto-push)
 
 ### v0.3
 - Intent detection: reflections ("I feel...") route to daily note Notes, not task inbox

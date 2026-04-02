@@ -10,6 +10,10 @@ briefing:
   time: "07:00"
   enabled: true
 
+weekly:
+  time: "17:00"   # sends on Fridays at this time
+  enabled: true
+
 checkins:
   morning:
     time: "07:05"

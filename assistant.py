@@ -125,6 +125,8 @@ async def classify_domain(text: str) -> str:
 INBOX_PATH = VAULT / "01 CONSUME" / "📥 Inbox" / "Bot Inbox.md"
 INBOX_HEADER = "# Bot Inbox\n\nTasks captured via Telegram. Tagged by domain for Dashboard queries.\n\n"
 
+FLYNN_MD_PATH = VAULT / "04 META" / "🤖 Agents" / "assistant" / "FLYNN.md"
+
 
 def save_to_inbox(text: str, domain: str, target_date: date | None = None) -> None:
     INBOX_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -137,12 +139,19 @@ def save_to_inbox(text: str, domain: str, target_date: date | None = None) -> No
 
 
 def read_active_focus() -> str:
+    """Read current focus from FLYNN.md, fall back to CURRENT_STATE.md."""
+    if FLYNN_MD_PATH.exists():
+        content = FLYNN_MD_PATH.read_text()
+        match = re.search(r"## Current Focus\n(.*?)(?=\n##|\Z)", content, re.DOTALL)
+        if match:
+            lines = [l.strip() for l in match.group(1).strip().splitlines() if l.strip()]
+            return "\n".join(lines)
     state_file = VAULT / "04 META" / "🤖 Agents" / "CURRENT_STATE.md"
-    if not state_file.exists():
-        return "No current state file found."
-    content = state_file.read_text()
-    match = re.search(r"## Active Focus\n(.*?)(?=\n##|\Z)", content, re.DOTALL)
-    return match.group(1).strip() if match else "See CURRENT_STATE.md"
+    if state_file.exists():
+        content = state_file.read_text()
+        match = re.search(r"## Active Focus\n(.*?)(?=\n##|\Z)", content, re.DOTALL)
+        return match.group(1).strip() if match else "See CURRENT_STATE.md"
+    return "No focus set — edit FLYNN.md to add one."
 
 
 def count_open_tasks() -> dict[str, int]:
@@ -157,6 +166,48 @@ def count_open_tasks() -> dict[str, int]:
         except Exception:
             pass
     return counts
+
+
+def get_overdue_tasks(days_threshold: int = 7) -> list[tuple[str, str]]:
+    """Return (domain, task_text) for open tasks overdue by more than days_threshold days."""
+    overdue = []
+    today = date.today()
+    pattern = re.compile(r"^- \[ \] (.+?) #domain/(\w+) 📅 (\d{4}-\d{2}-\d{2})")
+    for md_file in VAULT.rglob("*.md"):
+        try:
+            for line in md_file.read_text().splitlines():
+                m = pattern.match(line)
+                if m:
+                    task_text, domain, date_str = m.groups()
+                    if (today - date.fromisoformat(date_str)).days > days_threshold:
+                        overdue.append((domain, task_text))
+        except Exception:
+            pass
+    return overdue
+
+
+def get_weekly_stats() -> dict:
+    """Return captured/completed task counts per domain for the current week."""
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    stats = {d: {"captured": 0, "completed": 0, "tasks": []} for d in DOMAINS}
+    open_pat = re.compile(r"- \[ \] (.+?) #domain/(\w+) 📅 (\d{4}-\d{2}-\d{2})")
+    done_pat = re.compile(r"- \[x\] (.+?) #domain/(\w+) 📅 (\d{4}-\d{2}-\d{2})")
+    for md_file in VAULT.rglob("*.md"):
+        try:
+            content = md_file.read_text()
+            for m in open_pat.finditer(content):
+                text, domain, date_str = m.groups()
+                if domain in stats and monday <= date.fromisoformat(date_str) <= today:
+                    stats[domain]["captured"] += 1
+                    stats[domain]["tasks"].append(text)
+            for m in done_pat.finditer(content):
+                text, domain, date_str = m.groups()
+                if domain in stats and monday <= date.fromisoformat(date_str) <= today:
+                    stats[domain]["completed"] += 1
+        except Exception:
+            pass
+    return stats
 
 
 def read_domain_next_action(domain_id: str) -> str:
@@ -280,6 +331,7 @@ def parse_date_ref(text: str) -> date:
 # ── Daily Notes ───────────────────────────────────────────────────────────────
 
 DAILY_NOTES_ROOT = VAULT / "03 CREATE" / "Journal" / "Daily"
+WEEKLY_NOTES_ROOT = VAULT / "03 CREATE" / "Journal" / "Weekly"
 
 MORNING_PROMPT = (
     "🌅 *Morning check\\-in*\n\n"
@@ -371,6 +423,90 @@ def write_checkin_to_note(d: date, section: str, response: str) -> None:
         update_daily_note_frontmatter(d, scores)
 
 
+def write_weekly_note(stats: dict, overdue: list) -> Path:
+    """Create or update the weekly note for the current week."""
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    sunday = monday + timedelta(days=6)
+    week_str = today.strftime("%G-W%V")
+
+    WEEKLY_NOTES_ROOT.mkdir(parents=True, exist_ok=True)
+    path = WEEKLY_NOTES_ROOT / f"{week_str}.md"
+
+    # Build domain table
+    table_rows = []
+    for d in config["domains"]:
+        s = stats.get(d["id"], {})
+        captured = s.get("captured", 0)
+        completed = s.get("completed", 0)
+        table_rows.append(f"| {d['emoji']} {d['label']} | {captured} | {completed} |")
+
+    # Build overdue list
+    overdue_lines = ""
+    if overdue:
+        items = []
+        for domain, task_text in overdue:
+            d = DOMAINS.get(domain, {})
+            clean = re.sub(r"\s+📅\S+", "", task_text).strip()
+            items.append(f"- [ ] {clean} #domain/{domain}")
+        overdue_lines = "\n".join(items)
+    else:
+        overdue_lines = "_None — great week!_"
+
+    content = f"""---
+tags:
+  - weekly-note
+week: {week_str}
+date_range: {monday.isoformat()} to {sunday.isoformat()}
+---
+
+# {week_str} ({monday.strftime("%b %-d")} – {sunday.strftime("%b %-d, %Y")})
+
+## Domain Summary
+
+| Domain | Captured | Completed |
+|--------|----------|-----------|
+{chr(10).join(table_rows)}
+
+## Overdue Tasks
+
+{overdue_lines}
+
+## Reflections
+
+_What went well this week?_
+
+_What was hard?_
+
+_What do I want to carry into next week?_
+
+## Notes
+
+"""
+    path.write_text(content)
+    return path
+
+
+def build_weekly_text(stats: dict, overdue: list) -> str:
+    """Build the Telegram summary for the weekly digest."""
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    week_str = today.strftime("%G-W%V")
+
+    lines = [f"📊 *Week in review — {week_str}*\n"]
+    for d in config["domains"]:
+        s = stats.get(d["id"], {})
+        captured = s.get("captured", 0)
+        completed = s.get("completed", 0)
+        lines.append(f"{d['emoji']} *{d['label']}* — {captured} captured, {completed} done")
+
+    if overdue:
+        lines.append(f"\n⚠️ *{len(overdue)} overdue task(s)* — review in this week's note")
+
+    lines.append("\n_Weekly note created in your vault._")
+    return "\n".join(lines)
+
+
 def append_task_to_daily_note(text: str, domain: str, target_date: date) -> None:
     """Write a captured task into the Tasks Quick Add section of the target daily note."""
     path = create_daily_note_if_missing(target_date)
@@ -451,11 +587,12 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "👋 Assistant ready.\n\n"
-        "/today — morning briefing\n"
+        "/today — morning briefing + overdue flags\n"
         "/status — domain task counts\n"
         "/list [domain] — show open tasks\n"
         "/done — mark a task complete (pick from list)\n"
         "/focus <domain> <text> — set domain next action\n"
+        "/week — weekly digest + create weekly note\n"
         "/add <text> — quick capture\n"
         "/journal <text> — save to today's notes\n"
         "\nOr just send any text to capture it."
@@ -466,29 +603,7 @@ async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
     await update.message.reply_text("⏳ Building briefing...")
-
-    today_str = datetime.now().strftime("%A, %B %-d")
-    focus = read_active_focus()
-    counts = count_open_tasks()
-
-    lines = []
-    for d in config["domains"]:
-        emoji = d["emoji"]
-        label = d["label"]
-        count = counts.get(d["id"], 0)
-        next_action = read_domain_next_action(d["id"])
-        status = f"{count} open" if count else "clear"
-        line = f"{emoji} *{label}* — {status}"
-        if next_action:
-            line += f"\n  → _{next_action}_"
-        lines.append(line)
-
-    briefing = (
-        f"📋 *{today_str}*\n\n"
-        f"*Focus:*\n{focus}\n\n"
-        f"*Domains:*\n" + "\n\n".join(lines)
-    )
-    await update.message.reply_text(briefing, parse_mode="Markdown")
+    await update.message.reply_text(build_briefing_text(), parse_mode="Markdown")
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -580,6 +695,32 @@ async def cmd_focus(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Could not update {domain_id} — domain note not found.")
 
 
+async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    await update.message.reply_text("⏳ Building weekly digest...")
+    stats = get_weekly_stats()
+    overdue = get_overdue_tasks()
+    write_weekly_note(stats, overdue)
+    await update.message.reply_text(build_weekly_text(stats, overdue), parse_mode="Markdown")
+
+
+async def scheduled_weekly_digest(ctx) -> None:
+    """Runs every day but only sends on Fridays."""
+    if date.today().weekday() != 4:
+        return
+    if not ALLOWED_CHAT_ID:
+        return
+    stats = get_weekly_stats()
+    overdue = get_overdue_tasks()
+    write_weekly_note(stats, overdue)
+    await ctx.bot.send_message(
+        chat_id=int(ALLOWED_CHAT_ID),
+        text=build_weekly_text(stats, overdue),
+        parse_mode="Markdown",
+    )
+
+
 async def cmd_journal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
@@ -644,12 +785,13 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _capture(update, text)
 
 
-async def scheduled_briefing(ctx) -> None:
-    if not ALLOWED_CHAT_ID:
-        return
-    today_str = datetime.now(TIMEZONE).strftime("%A, %B %-d")
+def build_briefing_text() -> str:
+    """Shared logic for /today and the scheduled briefing."""
+    today_str = datetime.now().strftime("%A, %B %-d")
     focus = read_active_focus()
     counts = count_open_tasks()
+    overdue = get_overdue_tasks()
+
     lines = []
     for d in config["domains"]:
         count = counts.get(d["id"], 0)
@@ -659,14 +801,33 @@ async def scheduled_briefing(ctx) -> None:
         if next_action:
             line += f"\n  → _{next_action}_"
         lines.append(line)
+
     briefing = (
         f"📋 *{today_str}*\n\n"
         f"*Focus:*\n{focus}\n\n"
         f"*Domains:*\n" + "\n\n".join(lines)
     )
+
+    if overdue:
+        overdue_lines = []
+        for domain, task_text in overdue[:5]:
+            d = DOMAINS.get(domain, {})
+            emoji = d.get("emoji", "•")
+            clean = re.sub(r"\s+📅\S+", "", task_text).strip()
+            overdue_lines.append(f"{emoji} {clean[:60]}")
+        briefing += f"\n\n⚠️ *Overdue ({len(overdue)}):*\n" + "\n".join(overdue_lines)
+        if len(overdue) > 5:
+            briefing += f"\n_...and {len(overdue) - 5} more_"
+
+    return briefing
+
+
+async def scheduled_briefing(ctx) -> None:
+    if not ALLOWED_CHAT_ID:
+        return
     await ctx.bot.send_message(
         chat_id=int(ALLOWED_CHAT_ID),
-        text=briefing,
+        text=build_briefing_text(),
         parse_mode="Markdown",
     )
 
@@ -729,6 +890,7 @@ def main() -> None:
     app.add_handler(CommandHandler("focus", cmd_focus))
     app.add_handler(CommandHandler("add", cmd_add))
     app.add_handler(CommandHandler("journal", cmd_journal))
+    app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Schedule daily briefing
@@ -763,6 +925,17 @@ def main() -> None:
             name="evening_checkin",
         )
         log.info(f"Evening check-in scheduled at {h:02d}:{m:02d} {config.get('timezone')}")
+
+    # Weekly digest — runs daily, fires only on Fridays
+    weekly_cfg = config.get("weekly", {})
+    if weekly_cfg.get("enabled", True):
+        h, m = map(int, weekly_cfg.get("time", "17:00").split(":"))
+        jq.run_daily(
+            scheduled_weekly_digest,
+            time=dtime(h, m, tzinfo=TIMEZONE),
+            name="weekly_digest",
+        )
+        log.info(f"Weekly digest scheduled at {h:02d}:{m:02d} {config.get('timezone')} (Fridays)")
 
     log.info("Bot polling...")
     app.run_polling(drop_pending_updates=True)
