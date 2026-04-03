@@ -536,21 +536,35 @@ def save_reflection_to_daily_note(text: str) -> None:
 
 
 def parse_checkin_scores(section: str, response: str) -> dict:
-    """Extract numeric scores (1–5) from a check-in response."""
+    """Extract numeric scores (1–5) from a check-in response.
+    Only picks up numbers that appear after a relevant keyword on the same line,
+    or as a standalone rating (e.g. '4/5', 'a 3'). Ignores list item numbers."""
     scores = {}
-    numbers = re.findall(r"\b([1-5])\b", response)
+
+    def extract_score(pattern: str, text: str) -> int | None:
+        """Find a score after a keyword, ignoring list-item numbers like '1.' '2.'"""
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        # look for standalone rating format: "3/5", "a 4", "maybe a 3"
+        standalone = re.search(r"(?:^|\s)([1-5])\s*(?:/5|out of 5)?(?:\s|$|\.)", text, re.IGNORECASE)
+        if standalone:
+            return int(standalone.group(1))
+        return None
 
     if section == "Morning":
-        sleep_match = re.search(r"(?:slept?|sleep)[^\d]*([1-5])", response, re.IGNORECASE)
-        mood_match = re.search(r"(?:mood|feeling|feel)[^\d]*([1-5])", response, re.IGNORECASE)
-        scores["sleep"] = int(sleep_match.group(1)) if sleep_match else (int(numbers[0]) if len(numbers) > 0 else None)
-        scores["mood"] = int(mood_match.group(1)) if mood_match else (int(numbers[1]) if len(numbers) > 1 else None)
-        scores = {k: v for k, v in scores.items() if v is not None}
+        # Only look for scores on lines containing the relevant keyword
+        sleep_line = next((l for l in response.splitlines() if re.search(r"sleep|slept", l, re.IGNORECASE)), "")
+        mood_line = next((l for l in response.splitlines() if re.search(r"mood|feel|feeling", l, re.IGNORECASE)), "")
+        s = extract_score(r"(?:sleep|slept)[^\d\n]*([1-5])", sleep_line)
+        m = extract_score(r"(?:mood|feel|feeling)[^\d\n]*([1-5])", mood_line)
+        if s: scores["sleep"] = s
+        if m: scores["mood"] = m
 
     elif section == "Evening":
-        energy_match = re.search(r"(?:energy|day)[^\d]*([1-5])", response, re.IGNORECASE)
-        scores["energy"] = int(energy_match.group(1)) if energy_match else (int(numbers[0]) if numbers else None)
-        scores = {k: v for k, v in scores.items() if v is not None}
+        energy_line = next((l for l in response.splitlines() if re.search(r"energy|ending", l, re.IGNORECASE)), "")
+        e = extract_score(r"(?:energy|ending)[^\d\n]*([1-5])", energy_line)
+        if e: scores["energy"] = e
 
     return scores
 
