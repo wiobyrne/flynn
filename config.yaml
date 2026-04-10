@@ -6,9 +6,10 @@ default_domain: "self"
 
 timezone: "America/New_York"
 
+# Separate briefing disabled — morning check-in now includes compact status
 briefing:
   time: "07:00"
-  enabled: true
+  enabled: false
 
 weekly:
   time: "17:00"   # sends on Fridays at this time
@@ -16,10 +17,10 @@ weekly:
 
 checkins:
   morning:
-    time: "07:05"
+    time: "07:00"
     enabled: true
   evening:
-    time: "17:30"
+    time: "18:00"
     enabled: true
 
 ollama:

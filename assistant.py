@@ -333,23 +333,13 @@ def parse_date_ref(text: str) -> date:
 DAILY_NOTES_ROOT = VAULT / "03 CREATE" / "Journal" / "Daily"
 WEEKLY_NOTES_ROOT = VAULT / "03 CREATE" / "Journal" / "Weekly"
 
-MORNING_PROMPT = (
-    "🌅 *Morning check\\-in*\n\n"
-    "Answer however feels natural — I'll save it all\\.\n\n"
-    "1\\. *Sleep* — how'd you sleep? \\(1–5\\)\n"
-    "2\\. *Mood* — how are you feeling right now? \\(1–5\\)\n"
-    "3\\. *Anxiety* — anything weighing on you?\n"
-    "4\\. *Grateful* — one thing you're grateful for\n"
-    "5\\. *Intention* — what would make today a good day?\n"
-)
-
 EVENING_PROMPT = (
-    "🌙 *Evening check\\-in*\n\n"
-    "Answer however feels natural — I'll save it all\\.\n\n"
-    "1\\. *Energy* — how are you ending the day? \\(1–5\\)\n"
-    "2\\. *Wins* — what went well?\n"
-    "3\\. *Friction* — what was hard or unfinished?\n"
-    "4\\. *Tomorrow* — one thing you want to carry forward\n"
+    "🌙 *Evening wrap-up*\n\n"
+    "Answer however feels natural.\n\n"
+    "1. *Energy* — how are you ending the day? (1–5)\n"
+    "2. *Wins* — what went well?\n"
+    "3. *Friction* — what was hard or unfinished?\n"
+    "4. *Tomorrow* — one thing to carry forward\n"
 )
 
 
@@ -535,35 +525,59 @@ def save_reflection_to_daily_note(text: str) -> None:
     path.write_text(content)
 
 
+def fuzzy_score(text: str) -> int | None:
+    """Map qualitative words to a 1–5 score."""
+    lower = text.lower()
+    if re.search(r"\b(5|great|excellent|amazing|fantastic|perfect|really good)\b", lower):
+        return 5
+    if re.search(r"\b(4|good|well|solid|nice|pretty good)\b", lower):
+        return 4
+    if re.search(r"\b(3|okay|ok|alright|fine|decent|fair|average|so.so|not bad)\b", lower):
+        return 3
+    if re.search(r"\b(2|low|rough|bad|poor|not great|not good|struggling|tired)\b", lower):
+        return 2
+    if re.search(r"\b(1|terrible|awful|horrible|exhausted|really bad|miserable)\b", lower):
+        return 1
+    return None
+
+
 def parse_checkin_scores(section: str, response: str) -> dict:
     """Extract numeric scores (1–5) from a check-in response.
-    Only picks up numbers that appear after a relevant keyword on the same line,
-    or as a standalone rating (e.g. '4/5', 'a 3'). Ignores list item numbers."""
+    Checks for explicit digits first, then X/5 format, then fuzzy word matching.
+    Only reads scores from lines containing the relevant keyword."""
     scores = {}
 
-    def extract_score(pattern: str, text: str) -> int | None:
-        """Find a score after a keyword, ignoring list-item numbers like '1.' '2.'"""
-        m = re.search(pattern, text, re.IGNORECASE)
+    def score_from_line(line: str, keyword: str) -> int | None:
+        if not line or not re.search(keyword, line, re.IGNORECASE):
+            return None
+        # explicit digit after keyword
+        m = re.search(rf"(?:{keyword})[^\d\n]*([1-5])", line, re.IGNORECASE)
         if m:
             return int(m.group(1))
-        # look for standalone rating format: "3/5", "a 4", "maybe a 3"
-        standalone = re.search(r"(?:^|\s)([1-5])\s*(?:/5|out of 5)?(?:\s|$|\.)", text, re.IGNORECASE)
-        if standalone:
-            return int(standalone.group(1))
-        return None
+        # X/5 format anywhere on line
+        m = re.search(r"([1-5])\s*/\s*5", line)
+        if m:
+            return int(m.group(1))
+        # standalone digit with context (not a list number like "1.")
+        m = re.search(r"(?<!\d)([1-5])(?!\s*\.|/)", line)
+        if m:
+            return int(m.group(1))
+        # fuzzy word match
+        return fuzzy_score(line)
+
+    lines = response.splitlines()
 
     if section == "Morning":
-        # Only look for scores on lines containing the relevant keyword
-        sleep_line = next((l for l in response.splitlines() if re.search(r"sleep|slept", l, re.IGNORECASE)), "")
-        mood_line = next((l for l in response.splitlines() if re.search(r"mood|feel|feeling", l, re.IGNORECASE)), "")
-        s = extract_score(r"(?:sleep|slept)[^\d\n]*([1-5])", sleep_line)
-        m = extract_score(r"(?:mood|feel|feeling)[^\d\n]*([1-5])", mood_line)
+        sleep_line = next((l for l in lines if re.search(r"sleep|slept", l, re.IGNORECASE)), "")
+        mood_line = next((l for l in lines if re.search(r"mood|feel|feeling", l, re.IGNORECASE)), "")
+        s = score_from_line(sleep_line, r"sleep|slept")
+        m = score_from_line(mood_line, r"mood|feel|feeling")
         if s: scores["sleep"] = s
         if m: scores["mood"] = m
 
     elif section == "Evening":
-        energy_line = next((l for l in response.splitlines() if re.search(r"energy|ending", l, re.IGNORECASE)), "")
-        e = extract_score(r"(?:energy|ending)[^\d\n]*([1-5])", energy_line)
+        energy_line = next((l for l in lines if re.search(r"energy|feel|ending", l, re.IGNORECASE)), "")
+        e = score_from_line(energy_line, r"energy|feel|ending")
         if e: scores["energy"] = e
 
     return scores
@@ -799,6 +813,21 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await _capture(update, text)
 
 
+def build_compact_status() -> str:
+    """Two-line status for the combined morning message."""
+    counts = count_open_tasks()
+    overdue = get_overdue_tasks()
+    total = sum(counts.values())
+    bars = []
+    for d in config["domains"]:
+        count = counts.get(d["id"], 0)
+        filled = min(count, 3)
+        bar = d["emoji"] + "█" * filled + "░" * (3 - filled)
+        bars.append(bar)
+    overdue_str = f" · {len(overdue)} overdue ⚠️" if overdue else ""
+    return f"{total} open{overdue_str}\n" + "  ".join(bars)
+
+
 def build_briefing_text() -> str:
     """Shared logic for /today and the scheduled briefing."""
     today_str = datetime.now().strftime("%A, %B %-d")
@@ -851,10 +880,20 @@ async def scheduled_morning_checkin(ctx) -> None:
         return
     create_daily_note_if_missing(date.today())
     CHECKIN_STATE[int(ALLOWED_CHAT_ID)] = "Morning"
+    today_str = datetime.now(TIMEZONE).strftime("%A, %B %-d")
+    status = build_compact_status()
+    msg = (
+        f"📋 *{today_str}*\n{status}\n\n"
+        f"🌅 *Morning check-in*\n\n"
+        f"1. Sleep & Mood (1–5 each)\n"
+        f"2. Anything weighing on you?\n"
+        f"3. Grateful for?\n"
+        f"4. What are you working on today?\n"
+    )
     await ctx.bot.send_message(
         chat_id=int(ALLOWED_CHAT_ID),
-        text=MORNING_PROMPT,
-        parse_mode="MarkdownV2",
+        text=msg,
+        parse_mode="Markdown",
     )
 
 
@@ -865,7 +904,7 @@ async def scheduled_evening_checkin(ctx) -> None:
     await ctx.bot.send_message(
         chat_id=int(ALLOWED_CHAT_ID),
         text=EVENING_PROMPT,
-        parse_mode="MarkdownV2",
+        parse_mode="Markdown",
     )
 
 
@@ -873,7 +912,6 @@ async def _capture(update: Update, text: str) -> None:
     msg = await update.message.reply_text("⏳ Routing...")
     domain = await classify_domain(text)
     target_date = parse_date_ref(text)
-    save_to_inbox(text, domain, target_date)
     append_task_to_daily_note(text, domain, target_date)
     d = DOMAINS[domain]
     today = date.today()
