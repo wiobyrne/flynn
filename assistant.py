@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Personal AI Assistant Bot
+Flynn — Personal AI Assistant Bot
 - Quick capture via Telegram → routes to correct domain in Obsidian vault
-- Morning briefing: reads CURRENT_STATE.md + open tasks
-- Domain status: counts open tasks per domain
+- Tasks written to daily notes; reflections saved to Notes section
+- Morning check-in includes compact status; evening wrap-up at 18:00
 - AI routing: Ollama first, Claude API fallback, keyword fallback
+- Identity and focus read from FLYNN.md in vault
 """
 
 import os
@@ -122,35 +123,17 @@ async def classify_domain(text: str) -> str:
 
 # ── Vault Operations ──────────────────────────────────────────────────────────
 
-INBOX_PATH = VAULT / "01 CONSUME" / "📥 Inbox" / "Bot Inbox.md"
-INBOX_HEADER = "# Bot Inbox\n\nTasks captured via Telegram. Tagged by domain for Dashboard queries.\n\n"
-
 FLYNN_MD_PATH = VAULT / "04 META" / "🤖 Agents" / "assistant" / "FLYNN.md"
 
 
-def save_to_inbox(text: str, domain: str, target_date: date | None = None) -> None:
-    INBOX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if not INBOX_PATH.exists():
-        INBOX_PATH.write_text(INBOX_HEADER)
-    date_str = (target_date or date.today()).isoformat()
-    task_line = f"- [ ] {text} #domain/{domain} 📅 {date_str}\n"
-    with INBOX_PATH.open("a") as f:
-        f.write(task_line)
-
-
 def read_active_focus() -> str:
-    """Read current focus from FLYNN.md, fall back to CURRENT_STATE.md."""
+    """Read current focus from FLYNN.md."""
     if FLYNN_MD_PATH.exists():
         content = FLYNN_MD_PATH.read_text()
         match = re.search(r"## Current Focus\n(.*?)(?=\n##|\Z)", content, re.DOTALL)
         if match:
             lines = [l.strip() for l in match.group(1).strip().splitlines() if l.strip()]
             return "\n".join(lines)
-    state_file = VAULT / "04 META" / "🤖 Agents" / "CURRENT_STATE.md"
-    if state_file.exists():
-        content = state_file.read_text()
-        match = re.search(r"## Active Focus\n(.*?)(?=\n##|\Z)", content, re.DOTALL)
-        return match.group(1).strip() if match else "See CURRENT_STATE.md"
     return "No focus set — edit FLYNN.md to add one."
 
 
