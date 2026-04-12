@@ -323,6 +323,8 @@ EVENING_PROMPT = (
     "2. *Wins* — what went well?\n"
     "3. *Friction* — what was hard or unfinished?\n"
     "4. *Tomorrow* — one thing to carry forward\n"
+    "5. *Mission check* — did today's work lead back to the sentence?\n"
+    "_Yes / no / partially — and why?_\n"
 )
 
 
@@ -872,6 +874,8 @@ async def scheduled_morning_checkin(ctx) -> None:
         f"2. Anything weighing on you?\n"
         f"3. Grateful for?\n"
         f"4. What are you working on today?\n"
+        f"5. How does today's work connect to your mission?\n"
+        f"_\"I help educators navigate the digital world — so their students inherit power, not just access.\"_\n"
     )
     await ctx.bot.send_message(
         chat_id=int(ALLOWED_CHAT_ID),

@@ -65,7 +65,6 @@ domains:
       - nutrition
       - doctor
       - appointment
-      - Brighid
 
   - id: family
     label: "Family"
@@ -83,6 +82,7 @@ domains:
       - household
       - anniversary
       - date night
+      - Brighid
 
   - id: vocation
     label: "Vocation"
