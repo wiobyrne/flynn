@@ -4,6 +4,8 @@ vault_path: "/home/wiobyrne/Documents/wiobyrne"
 
 default_domain: "self"
 
+api_port: 8765  # local agent API — POST /capture, GET /health
+
 timezone: "America/New_York"
 
 # Separate briefing disabled — morning check-in now includes compact status

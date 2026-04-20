@@ -6,17 +6,20 @@ Flynn — Personal AI Assistant Bot
 - Morning check-in includes compact status; evening wrap-up at 18:00
 - AI routing: Ollama first, Claude API fallback, keyword fallback
 - Identity and focus read from FLYNN.md in vault
+- /note command: fleeting note capture (text, voice, image, link) → 01 CONSUME/📥 Inbox/
 """
 
 import os
 import re
 import yaml
 import logging
+import asyncio
 import httpx
 from datetime import date, datetime, time as dtime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from dotenv import load_dotenv
+import json
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -25,6 +28,12 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+
+try:
+    from faster_whisper import WhisperModel
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -42,10 +51,27 @@ DOMAINS = {d["id"]: d for d in config["domains"]}
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ALLOWED_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")  # only respond to your chat
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+API_PORT = int(config.get("api_port", 8765))  # local agent API
+API_SECRET = os.getenv("FLYNN_API_SECRET", "")  # optional shared secret
 
 TIMEZONE = ZoneInfo(config.get("timezone", "America/New_York"))
 CHECKIN_STATE: dict[int, str] = {}  # chat_id → "morning" | "evening"
 DONE_STATE: dict[int, list] = {}   # chat_id → list of (file, line_num, task_text)
+NOTE_STATE: set[int] = set()        # chat_ids waiting for a fleeting note
+
+INBOX_PATH = VAULT / "01 CONSUME" / "📥 Inbox"
+INBOX_PATH.mkdir(parents=True, exist_ok=True)
+
+_whisper_model: "WhisperModel | None" = None
+
+def get_whisper_model() -> "WhisperModel | None":
+    global _whisper_model
+    if not WHISPER_AVAILABLE:
+        return None
+    if _whisper_model is None:
+        log.info("Loading Whisper model (base)...")
+        _whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+    return _whisper_model
 
 logging.basicConfig(
     level=logging.INFO,
@@ -608,6 +634,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/week — weekly digest + create weekly note\n"
         "/add <text> — quick capture\n"
         "/journal <text> — save to today's notes\n"
+        "/note — fleeting note (text, voice, image, link → inbox)\n"
+        "/cancel — cancel current capture session\n"
         "\nOr just send any text to capture it."
     )
 
@@ -734,6 +762,182 @@ async def scheduled_weekly_digest(ctx) -> None:
     )
 
 
+# ── Fleeting Notes ────────────────────────────────────────────────────────────
+
+def create_fleeting_note(content: str, note_type: str = "text", audio_file: str | None = None) -> Path:
+    """Write a fleeting note to the inbox using the vault template format."""
+    now = datetime.now(TIMEZONE)
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H:%M")
+    safe_time = now.strftime("%H-%M")
+    filename = f"{date_str} {safe_time} fleeting.md"
+    path = INBOX_PATH / filename
+
+    title = content[:60].strip().replace('"', "'")
+    audio_line = f"\n**Audio:** [[{audio_file}]]" if audio_file else ""
+
+    body = (
+        f"---\n"
+        f'title: "{title}"\n'
+        f"tags: []\n"
+        f"categories: Notes\n"
+        f"status: 🌱_seed\n"
+        f"dg-publish: false\n"
+        f'date: "{date_str}, {time_str}"\n'
+        f"shelf: draft\n"
+        f"type: {note_type}\n"
+        f"---\n\n"
+        f"## Quick Note\n"
+        f"{content}{audio_line}\n\n"
+        f"## Context (Optional)\n\n"
+        f"## Next Steps (Optional)\n"
+        f"- [ ] Process this into a seed/plant note.\n"
+    )
+    path.write_text(body)
+    return path
+
+
+def transcribe_audio(ogg_path: Path) -> str | None:
+    """Transcribe an audio file using Whisper. Returns text or None."""
+    model = get_whisper_model()
+    if not model:
+        return None
+    try:
+        segments, _ = model.transcribe(str(ogg_path), beam_size=5)
+        return " ".join(s.text.strip() for s in segments).strip()
+    except Exception as e:
+        log.warning(f"Whisper transcription failed: {e}")
+        return None
+
+
+async def cmd_note(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Start a fleeting note capture session, or capture inline text immediately."""
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    inline_text = " ".join(ctx.args).strip()
+    if inline_text:
+        path = create_fleeting_note(inline_text)
+        await update.message.reply_text(
+            f"✓ *Fleeting note saved*\n`{path.name}`",
+            parse_mode="Markdown",
+        )
+    else:
+        NOTE_STATE.add(chat_id)
+        await update.message.reply_text(
+            "📝 Send your note — text, voice, image, or link.",
+            parse_mode="Markdown",
+        )
+
+
+async def handle_note_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle voice messages: download OGG, transcribe, save fleeting note."""
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    if chat_id not in NOTE_STATE:
+        await update.message.reply_text("Use /note first to start a capture session.")
+        return
+    NOTE_STATE.discard(chat_id)
+
+    now = datetime.now(TIMEZONE)
+    audio_filename = now.strftime("%Y-%m-%d %H-%M") + " audio.ogg"
+    audio_path = INBOX_PATH / audio_filename
+
+    voice = update.message.voice
+    tg_file = await ctx.bot.get_file(voice.file_id)
+    await tg_file.download_to_drive(str(audio_path))
+
+    msg = await update.message.reply_text("⏳ Transcribing...")
+    transcript = transcribe_audio(audio_path)
+
+    if transcript:
+        content = transcript
+        note_path = create_fleeting_note(content, note_type="voice", audio_file=audio_filename)
+        await msg.edit_text(
+            f"✓ *Fleeting note saved*\n_{transcript[:120]}_\n`{note_path.name}`",
+            parse_mode="Markdown",
+        )
+    else:
+        note_path = create_fleeting_note(
+            f"Voice note — transcription unavailable.",
+            note_type="voice",
+            audio_file=audio_filename,
+        )
+        await msg.edit_text(
+            f"✓ *Audio saved* (transcription unavailable)\n`{note_path.name}`",
+            parse_mode="Markdown",
+        )
+
+
+async def handle_note_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle photo messages: download image, save fleeting note with embed."""
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    if chat_id not in NOTE_STATE:
+        await update.message.reply_text("Use /note first to start a capture session.")
+        return
+    NOTE_STATE.discard(chat_id)
+
+    now = datetime.now(TIMEZONE)
+    image_filename = now.strftime("%Y-%m-%d %H-%M") + " image.jpg"
+    image_path = INBOX_PATH / image_filename
+
+    photo = update.message.photo[-1]  # largest size
+    tg_file = await ctx.bot.get_file(photo.file_id)
+    await tg_file.download_to_drive(str(image_path))
+
+    caption = update.message.caption or ""
+    content = f"![[{image_filename}]]"
+    if caption:
+        content = f"{caption}\n\n{content}"
+
+    note_path = create_fleeting_note(content, note_type="image")
+    await update.message.reply_text(
+        f"✓ *Image saved*\n`{note_path.name}`",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_note_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle text/link messages when in NOTE_STATE."""
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    if chat_id not in NOTE_STATE:
+        return  # fall through to handle_text
+    NOTE_STATE.discard(chat_id)
+
+    text = update.message.text
+    note_type = "link" if text.startswith("http") else "text"
+    note_path = create_fleeting_note(text, note_type=note_type)
+    await update.message.reply_text(
+        f"✓ *Fleeting note saved*\n`{note_path.name}`",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    cleared = []
+    if chat_id in NOTE_STATE:
+        NOTE_STATE.discard(chat_id)
+        cleared.append("note capture")
+    if chat_id in CHECKIN_STATE:
+        del CHECKIN_STATE[chat_id]
+        cleared.append("check-in")
+    if chat_id in DONE_STATE:
+        del DONE_STATE[chat_id]
+        cleared.append("done selection")
+    if cleared:
+        await update.message.reply_text(f"✗ Cancelled: {', '.join(cleared)}.")
+    else:
+        await update.message.reply_text("Nothing active to cancel.")
+
+
 async def cmd_journal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
@@ -760,6 +964,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     chat_id = update.effective_chat.id
     text = update.message.text
+
+    # Fleeting note capture takes priority when in NOTE_STATE
+    if chat_id in NOTE_STATE:
+        await handle_note_text(update, ctx)
+        return
 
     # /done numbered selection
     if chat_id in DONE_STATE:
@@ -875,7 +1084,7 @@ async def scheduled_morning_checkin(ctx) -> None:
         f"3. Grateful for?\n"
         f"4. What are you working on today?\n"
         f"5. How does today's work connect to your mission?\n"
-        f"_\"I help educators navigate the digital world — so their students inherit power, not just access.\"_\n"
+        f"_\"I help educators understand and navigate the digital world — so their students inherit power, not just access.\"_\n"
     )
     await ctx.bot.send_message(
         chat_id=int(ALLOWED_CHAT_ID),
@@ -914,27 +1123,157 @@ async def _capture(update: Update, text: str) -> None:
     )
 
 
+# ── Local Agent API ───────────────────────────────────────────────────────────
+#
+# POST http://localhost:8765/capture
+# Headers: X-Flynn-Secret: <FLYNN_API_SECRET>  (optional but recommended)
+# Body:
+#   { "text": "...", "domain": "infrastructure", "type": "task|note|fleeting" }
+#
+# type "task"     → appended to today's daily note, domain-tagged
+# type "note"     → saved to today's ## Notes section (reflection)
+# type "fleeting" → new fleeting note in 01 CONSUME/📥 Inbox/
+# domain          → optional override; skips AI classification when provided
+# notify          → optional bool, sends Telegram message to you when true
+
+_tg_app = None  # set in main(), used by API handlers
+
+
+
+
+def _json_response(writer: asyncio.StreamWriter, data: dict, status: int = 200) -> None:
+    body = json.dumps(data).encode()
+    reason = "OK" if status == 200 else "Error"
+    writer.write(
+        f"HTTP/1.1 {status} {reason}\r\n"
+        f"Content-Type: application/json\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        f"Connection: close\r\n\r\n".encode() + body
+    )
+
+
+async def _handle_api_request(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    try:
+        raw = await asyncio.wait_for(reader.read(65536), timeout=10)
+        text_raw = raw.decode(errors="replace")
+        lines = text_raw.split("\r\n")
+        if not lines:
+            return
+        method, path_str, *_ = (lines[0] + " ").split(" ", 2)
+
+        # Parse headers
+        headers: dict[str, str] = {}
+        i = 1
+        while i < len(lines) and lines[i]:
+            if ":" in lines[i]:
+                k, v = lines[i].split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+            i += 1
+        body = text_raw.split("\r\n\r\n", 1)[-1] if "\r\n\r\n" in text_raw else ""
+
+        # Auth
+        if API_SECRET and headers.get("x-flynn-secret", "") != API_SECRET:
+            _json_response(writer, {"error": "unauthorized"}, 401)
+            return
+
+        if method == "GET" and path_str == "/health":
+            counts = count_open_tasks()
+            _json_response(writer, {"status": "ok", "open_tasks": counts})
+            return
+
+        if method == "POST" and path_str == "/capture":
+            try:
+                data = json.loads(body)
+            except Exception:
+                _json_response(writer, {"error": "invalid JSON"}, 400)
+                return
+
+            text = (data.get("text") or "").strip()
+            if not text:
+                _json_response(writer, {"error": "text required"}, 400)
+                return
+
+            note_type = data.get("type", "task")
+            domain_override = data.get("domain", "").strip().lower()
+            notify = data.get("notify", False)
+
+            if note_type == "fleeting":
+                path = create_fleeting_note(text, note_type="agent")
+                result: dict = {"saved": "fleeting", "file": path.name}
+            elif note_type == "note":
+                save_reflection_to_daily_note(text)
+                result = {"saved": "reflection"}
+            else:
+                if domain_override and domain_override in DOMAINS:
+                    domain = domain_override
+                else:
+                    domain = await classify_domain(text)
+                target_date = parse_date_ref(text)
+                append_task_to_daily_note(text, domain, target_date)
+                result = {"saved": "task", "domain": domain, "date": target_date.isoformat()}
+
+            if notify and _tg_app and ALLOWED_CHAT_ID:
+                d = DOMAINS.get(result.get("domain", ""), {})
+                emoji = d.get("emoji", "🤖")
+                await _tg_app.bot.send_message(
+                    chat_id=int(ALLOWED_CHAT_ID),
+                    text=f"{emoji} *Agent:* {text[:200]}",
+                    parse_mode="Markdown",
+                )
+
+            log.info(f"API capture: {result}")
+            _json_response(writer, result)
+            return
+
+        _json_response(writer, {"error": "not found"}, 404)
+
+    except Exception as e:
+        log.warning(f"API error: {e}")
+        try:
+            _json_response(writer, {"error": "internal error"}, 500)
+        except Exception:
+            pass
+    finally:
+        await writer.drain()
+        writer.close()
+
+
+async def start_api_server() -> asyncio.Server:
+    server = await asyncio.start_server(
+        _handle_api_request, "127.0.0.1", API_PORT
+    )
+    log.info(f"Agent API listening on http://127.0.0.1:{API_PORT}")
+    return server
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+async def run() -> None:
+    global _tg_app
     if not TELEGRAM_TOKEN:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in .env")
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("today", cmd_today))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("list", cmd_list))
-    app.add_handler(CommandHandler("done", cmd_done))
-    app.add_handler(CommandHandler("focus", cmd_focus))
-    app.add_handler(CommandHandler("add", cmd_add))
-    app.add_handler(CommandHandler("journal", cmd_journal))
-    app.add_handler(CommandHandler("week", cmd_week))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    tg_app = Application.builder().token(TELEGRAM_TOKEN).build()
+    _tg_app = tg_app
+
+    tg_app.add_handler(CommandHandler("start", cmd_start))
+    tg_app.add_handler(CommandHandler("today", cmd_today))
+    tg_app.add_handler(CommandHandler("status", cmd_status))
+    tg_app.add_handler(CommandHandler("list", cmd_list))
+    tg_app.add_handler(CommandHandler("done", cmd_done))
+    tg_app.add_handler(CommandHandler("focus", cmd_focus))
+    tg_app.add_handler(CommandHandler("add", cmd_add))
+    tg_app.add_handler(CommandHandler("journal", cmd_journal))
+    tg_app.add_handler(CommandHandler("week", cmd_week))
+    tg_app.add_handler(CommandHandler("note", cmd_note))
+    tg_app.add_handler(CommandHandler("cancel", cmd_cancel))
+    tg_app.add_handler(MessageHandler(filters.VOICE, handle_note_voice))
+    tg_app.add_handler(MessageHandler(filters.PHOTO, handle_note_photo))
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Schedule daily briefing
     briefing_cfg = config.get("briefing", {})
-    jq = app.job_queue
+    jq = tg_app.job_queue
     if briefing_cfg.get("enabled", False):
         h, m = map(int, briefing_cfg["time"].split(":"))
         jq.run_daily(
@@ -976,8 +1315,24 @@ def main() -> None:
         )
         log.info(f"Weekly digest scheduled at {h:02d}:{m:02d} {config.get('timezone')} (Fridays)")
 
+    # Start local agent API server alongside Telegram bot
+    api_server = await start_api_server()
+
     log.info("Bot polling...")
-    app.run_polling(drop_pending_updates=True)
+    async with tg_app:
+        await tg_app.start()
+        await tg_app.updater.start_polling(drop_pending_updates=True)
+        # Run until interrupted
+        await asyncio.Event().wait()
+        await tg_app.updater.stop()
+        await tg_app.stop()
+
+    api_server.close()
+    await api_server.wait_closed()
+
+
+def main() -> None:
+    asyncio.run(run())
 
 
 if __name__ == "__main__":
