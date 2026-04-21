@@ -96,9 +96,40 @@ limit 5
 ```
 ````
 
+**Task Dashboard** — create `00 DOMAINS/Task Dashboard.md` with Tasks queries for today, overdue, per-domain, and waiting items. This is your single top-level view of all tasks across the vault:
+
+````markdown
+## Today
+```tasks
+not done
+due today
+short mode
+```
+
+## Overdue
+```tasks
+not done
+due before today
+short mode
+limit 10
+```
+
+## 🔨 Build
+```tasks
+not done
+tags include #domain/build
+limit 5
+short mode
+```
+````
+
+Repeat per-domain blocks for each of your five domains. Then embed the dashboard in a top-level `00 DOMAINS/00 DOMAINS.md` note alongside your Bases file.
+
+The Tasks plugin scans the entire vault at query time — any task Flynn writes anywhere with the right tag or date surfaces here automatically. You don't maintain it manually.
+
 Create `01 CONSUME/📥 Inbox/` — Flynn saves fleeting notes here.
 
-Create daily notes at `03 CREATE/Journal/Daily/YYYY/MM/YYYY-MM-DD.md` — Flynn writes tasks and reflections here. Adjust the path in `config.yaml` if needed.
+Create daily notes at `03 CREATE/Journal/Daily/YYYY/MM/YYYY-MM-DD.md` — Flynn writes tasks, morning plans, and reflections here. Adjust the path in `config.yaml` if needed.
 
 ### 6. Run
 
