@@ -953,37 +953,50 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 PINS_PATH = VAULT / "04 META" / "🤖 Agents" / "Pins.md"
 
-PLAN_PROMPT = """You are Flynn, a calm executive-function aid helping Ian sort his morning brain-dump.
+PLAN_PROMPT = """You are Flynn, a calm and opinionated executive-function aid helping Ian plan his day.
 
 Mission: "I help educators understand and navigate the digital world — so their students inherit power, not just access."
 
 Domains: Self (health, fitness, wellbeing), Family (marriage, home, kids), Vocation (teaching, research, CofC), Build (newsletter, blog, courses, speaking), Infrastructure (homelab, vault, AI tools)
 
-Sort the brain-dump into exactly these four sections. Be concise — one line per item.
+Your job is NOT just to sort. Your job is to push back.
 
-TOP 1-3 TODAY (mission-aligned, realistic, highest restart cost if deferred):
-LATER THIS WEEK (real but not urgent today):
-WAITING / BLOCKED (needs someone else or more info):
-NOT NOW / DEFER (mental noise, someday, low signal):
+If Ian lists 8 things as today priorities, tell him that's not a plan — that's a list. Narrow it. Challenge it. Be direct but calm. If something is anxiety dressed as a task, name it. If something doesn't connect to his mission or season of work, say so.
+
+Return exactly these four sections. One line per item. Be concise.
+
+TOP 1-3 TODAY:
+(strictly 1-3 items — mission-aligned, realistic given energy, highest cost if deferred. If you can only justify 1, say 1.)
+
+LATER THIS WEEK:
+(real commitments, not today)
+
+WAITING / BLOCKED:
+(needs someone else or more info — tag these #waiting)
+
+NOT NOW / DEFER:
+(mental noise, anxiety, someday, low signal — these do NOT become tasks)
+
+After the sort, add one line: FOCUS — a single sentence on what today is actually about.
 
 Sorting principles:
-- Mission alignment and restart cost matter more than urgency
-- Mental noise and vague worries do NOT become tasks
-- Prefer fewer items in TOP 1-3 over an overloaded list
-- If energy context is given, match high-focus work to available energy
-- Ask ONE clarifying question only if something is genuinely ambiguous
+- Mission alignment and restart cost beat urgency
+- Mental noise is not a task
+- Energy context matters — match demanding work to available energy
+- If something clearly belongs to a domain, note it in parentheses: (vocation), (build), etc.
+- Ask ONE clarifying question only if genuinely needed — not as a default
 
 Brain dump:
 {text}
 
-Return only the four sections and an optional single question. No preamble."""
+Return only the four sections, the FOCUS line, and an optional single question. No preamble. No commentary."""
 
 
 async def run_plan_sort(text: str) -> str:
     """Send brain-dump to Ollama for sorting. Returns formatted sort or error."""
     prompt = PLAN_PROMPT.format(text=text)
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=45) as client:
             r = await client.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
@@ -991,7 +1004,91 @@ async def run_plan_sort(text: str) -> str:
             return r.json().get("response", "").strip()
     except Exception as e:
         log.warning(f"Ollama plan sort failed: {e}")
-        return "⚠️ Ollama unavailable — send your dump and I'll sort manually."
+        return "⚠️ Ollama unavailable — try again or send tasks manually with /add."
+
+
+def extract_top_tasks(sort_result: str) -> list[str]:
+    """Pull items from the TOP 1-3 TODAY section of the sort result."""
+    tasks = []
+    in_top = False
+    for line in sort_result.splitlines():
+        stripped = line.strip()
+        if "TOP 1-3 TODAY" in stripped.upper():
+            in_top = True
+            continue
+        if in_top:
+            if stripped.startswith("##") or (stripped.isupper() and len(stripped) > 4):
+                break
+            if stripped.startswith("-") or stripped.startswith("•"):
+                tasks.append(stripped.lstrip("-•").strip())
+            elif stripped and not stripped.startswith("#"):
+                tasks.append(stripped)
+    return [t for t in tasks if t]
+
+
+def write_morning_plan(sort_result: str, raw_dump: str) -> None:
+    """Write the morning plan sort to today's daily note."""
+    today = date.today()
+    path = create_daily_note_if_missing(today)
+    content = path.read_text()
+    timestamp = datetime.now(TIMEZONE).strftime("%H:%M")
+
+    plan_block = (
+        f"\n## Morning Plan\n\n"
+        f"*{timestamp}*\n\n"
+        f"{sort_result}\n\n"
+        f"<details><summary>Raw dump</summary>\n\n{raw_dump}\n\n</details>\n"
+    )
+
+    # Append Morning Plan section before Notes
+    marker = "## Notes\n"
+    if "## Morning Plan\n" in content:
+        pass  # already exists, don't duplicate
+    elif marker in content:
+        content = content.replace(marker, plan_block + "\n" + marker, 1)
+        path.write_text(content)
+    else:
+        path.write_text(content + plan_block)
+
+    # Write Top 1-3 as real tasks
+    top_tasks = extract_top_tasks(sort_result)
+    for task_text in top_tasks[:3]:
+        domain = "build"  # default — classify_domain is async, do synchronously via keyword
+        for d in config["domains"]:
+            if any(kw in task_text.lower() for kw in d.get("keywords", [])):
+                domain = d["id"]
+                break
+        append_task_to_daily_note(task_text, domain, today)
+
+    # Write waiting items with #waiting tag
+    in_waiting = False
+    for line in sort_result.splitlines():
+        stripped = line.strip()
+        if "WAITING" in stripped.upper() and "/" in stripped:
+            in_waiting = True
+            continue
+        if in_waiting:
+            if stripped.isupper() and len(stripped) > 4:
+                break
+            if stripped.startswith("-") or stripped.startswith("•"):
+                task_text = stripped.lstrip("-•").strip() + " #waiting"
+                append_task_to_daily_note(task_text, "build", today)
+
+    # Write Not Now as a single reflection line
+    not_now_items = []
+    in_not_now = False
+    for line in sort_result.splitlines():
+        stripped = line.strip()
+        if "NOT NOW" in stripped.upper():
+            in_not_now = True
+            continue
+        if in_not_now:
+            if stripped.isupper() and len(stripped) > 4:
+                break
+            if stripped.startswith("-") or stripped.startswith("•"):
+                not_now_items.append(stripped.lstrip("-•").strip())
+    if not_now_items:
+        save_reflection_to_daily_note("Parked (not now): " + "; ".join(not_now_items))
 
 
 def write_pin(pin_text: str) -> None:
@@ -1041,9 +1138,11 @@ async def handle_plan_dump(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     text = update.message.text
     msg = await update.message.reply_text("⏳ Sorting...")
     result = await run_plan_sort(text)
+    write_morning_plan(result, text)
+    top_count = len(extract_top_tasks(result))
     await msg.edit_text(
-        f"📋 *Today's sort*\n\n{result}\n\n"
-        f"_Real tasks → /add or just send them. To save a decision, /journal it._",
+        f"📋 *Today's plan*\n\n{result}\n\n"
+        f"_Saved to today's note — {top_count} task(s) added to Tasks Quick Add._",
         parse_mode="Markdown",
     )
 
