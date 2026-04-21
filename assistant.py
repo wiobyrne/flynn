@@ -58,6 +58,8 @@ TIMEZONE = ZoneInfo(config.get("timezone", "America/New_York"))
 CHECKIN_STATE: dict[int, str] = {}  # chat_id → "morning" | "evening"
 DONE_STATE: dict[int, list] = {}   # chat_id → list of (file, line_num, task_text)
 NOTE_STATE: set[int] = set()        # chat_ids waiting for a fleeting note
+PLAN_STATE: set[int] = set()        # chat_ids waiting for a brain-dump
+PIN_STATE: set[int] = set()         # chat_ids waiting for a pin message
 
 INBOX_PATH = VAULT / "01 CONSUME" / "📥 Inbox"
 INBOX_PATH.mkdir(parents=True, exist_ok=True)
@@ -635,7 +637,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/add <text> — quick capture\n"
         "/journal <text> — save to today's notes\n"
         "/note — fleeting note (text, voice, image, link → inbox)\n"
-        "/cancel — cancel current capture session\n"
+        "/plan — morning brain-dump sort\n"
+        "/pin — save current task context for later\n"
+        "/resume — retrieve last pin\n"
+        "/cancel — cancel current session\n"
         "\nOr just send any text to capture it."
     )
 
@@ -926,6 +931,12 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if chat_id in NOTE_STATE:
         NOTE_STATE.discard(chat_id)
         cleared.append("note capture")
+    if chat_id in PLAN_STATE:
+        PLAN_STATE.discard(chat_id)
+        cleared.append("planning session")
+    if chat_id in PIN_STATE:
+        PIN_STATE.discard(chat_id)
+        cleared.append("pin")
     if chat_id in CHECKIN_STATE:
         del CHECKIN_STATE[chat_id]
         cleared.append("check-in")
@@ -936,6 +947,150 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"✗ Cancelled: {', '.join(cleared)}.")
     else:
         await update.message.reply_text("Nothing active to cancel.")
+
+
+# ── Planning & Pins ───────────────────────────────────────────────────────────
+
+PINS_PATH = VAULT / "04 META" / "🤖 Agents" / "Pins.md"
+
+PLAN_PROMPT = """You are Flynn, a calm executive-function aid helping Ian sort his morning brain-dump.
+
+Mission: "I help educators understand and navigate the digital world — so their students inherit power, not just access."
+
+Domains: Self (health, fitness, wellbeing), Family (marriage, home, kids), Vocation (teaching, research, CofC), Build (newsletter, blog, courses, speaking), Infrastructure (homelab, vault, AI tools)
+
+Sort the brain-dump into exactly these four sections. Be concise — one line per item.
+
+TOP 1-3 TODAY (mission-aligned, realistic, highest restart cost if deferred):
+LATER THIS WEEK (real but not urgent today):
+WAITING / BLOCKED (needs someone else or more info):
+NOT NOW / DEFER (mental noise, someday, low signal):
+
+Sorting principles:
+- Mission alignment and restart cost matter more than urgency
+- Mental noise and vague worries do NOT become tasks
+- Prefer fewer items in TOP 1-3 over an overloaded list
+- If energy context is given, match high-focus work to available energy
+- Ask ONE clarifying question only if something is genuinely ambiguous
+
+Brain dump:
+{text}
+
+Return only the four sections and an optional single question. No preamble."""
+
+
+async def run_plan_sort(text: str) -> str:
+    """Send brain-dump to Ollama for sorting. Returns formatted sort or error."""
+    prompt = PLAN_PROMPT.format(text=text)
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False},
+            )
+            return r.json().get("response", "").strip()
+    except Exception as e:
+        log.warning(f"Ollama plan sort failed: {e}")
+        return "⚠️ Ollama unavailable — send your dump and I'll sort manually."
+
+
+def write_pin(pin_text: str) -> None:
+    """Append a pin entry to Pins.md."""
+    now = datetime.now(TIMEZONE)
+    timestamp = now.strftime("%Y-%m-%d %H:%M")
+    entry = f"\n## {timestamp}\n{pin_text.strip()}\n"
+    if not PINS_PATH.exists():
+        PINS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PINS_PATH.write_text(
+            "---\ntitle: Pins\ntype: system\n---\n\n# Pins\n\n"
+            "_Active context switches — use /resume to retrieve the latest._\n"
+        )
+    content = PINS_PATH.read_text()
+    PINS_PATH.write_text(content + entry)
+
+
+def read_last_pin() -> str | None:
+    """Return the most recent pin entry, or None if none exist."""
+    if not PINS_PATH.exists():
+        return None
+    content = PINS_PATH.read_text()
+    sections = content.split("\n## ")
+    if len(sections) < 2:
+        return None
+    return "## " + sections[-1].strip()
+
+
+async def cmd_plan(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Start a morning planning session — waits for a brain-dump."""
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    PLAN_STATE.add(chat_id)
+    await update.message.reply_text(
+        "🧠 *Morning planning*\n\n"
+        "Send your brain-dump — everything on your mind for today.\n\n"
+        "Include energy level and any context if it's useful. No structure needed.",
+        parse_mode="Markdown",
+    )
+
+
+async def handle_plan_dump(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Process a brain-dump sent after /plan."""
+    chat_id = update.effective_chat.id
+    PLAN_STATE.discard(chat_id)
+    text = update.message.text
+    msg = await update.message.reply_text("⏳ Sorting...")
+    result = await run_plan_sort(text)
+    await msg.edit_text(
+        f"📋 *Today's sort*\n\n{result}\n\n"
+        f"_Real tasks → /add or just send them. To save a decision, /journal it._",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_pin(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save current task context for later resumption."""
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    inline = " ".join(ctx.args).strip()
+    if inline:
+        write_pin(inline)
+        await update.message.reply_text("📌 Pinned.", parse_mode="Markdown")
+    else:
+        PIN_STATE.add(chat_id)
+        await update.message.reply_text(
+            "📌 *Pin this task*\n\n"
+            "Send your pin in this format:\n\n"
+            "*Doing:* what you're working on\n"
+            "*Stopped at:* where you are right now\n"
+            "*Next:* first action when you return\n"
+            "*Blocker:* anything in the way (or none)\n"
+            "*Linked to:* note/project/domain (or skip)",
+            parse_mode="Markdown",
+        )
+
+
+async def handle_pin_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Save a pin sent after /pin prompt."""
+    chat_id = update.effective_chat.id
+    PIN_STATE.discard(chat_id)
+    write_pin(update.message.text)
+    await update.message.reply_text("📌 Pinned.", parse_mode="Markdown")
+
+
+async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Retrieve the most recent pin."""
+    if not is_allowed(update):
+        return
+    pin = read_last_pin()
+    if not pin:
+        await update.message.reply_text("No pins saved yet.")
+        return
+    await update.message.reply_text(
+        f"📌 *Last pin*\n\n{pin}",
+        parse_mode="Markdown",
+    )
 
 
 async def cmd_journal(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -965,9 +1120,19 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     text = update.message.text
 
-    # Fleeting note capture takes priority when in NOTE_STATE
+    # Fleeting note capture
     if chat_id in NOTE_STATE:
         await handle_note_text(update, ctx)
+        return
+
+    # Planning brain-dump
+    if chat_id in PLAN_STATE:
+        await handle_plan_dump(update, ctx)
+        return
+
+    # Pin message
+    if chat_id in PIN_STATE:
+        await handle_pin_message(update, ctx)
         return
 
     # /done numbered selection
@@ -1267,6 +1432,9 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("week", cmd_week))
     tg_app.add_handler(CommandHandler("note", cmd_note))
     tg_app.add_handler(CommandHandler("cancel", cmd_cancel))
+    tg_app.add_handler(CommandHandler("plan", cmd_plan))
+    tg_app.add_handler(CommandHandler("pin", cmd_pin))
+    tg_app.add_handler(CommandHandler("resume", cmd_resume))
     tg_app.add_handler(MessageHandler(filters.VOICE, handle_note_voice))
     tg_app.add_handler(MessageHandler(filters.PHOTO, handle_note_photo))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
