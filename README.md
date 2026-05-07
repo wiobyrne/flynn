@@ -149,12 +149,15 @@ nohup venv/bin/python assistant.py > flynn.log 2>&1 &
 
 | Command | Description |
 |---------|-------------|
-| `/today` | Morning briefing — domain status, next actions, overdue flags |
+| `/today` | Morning briefing — focus tasks, domain next actions, overdue flags |
+| `/tasks` | View today's focus tasks; `/tasks <text>` to set inline |
+| `/tomorrow <text>` | Queue a task directly to tomorrow's Today's Focus |
+| `/trends [days]` | Sleep/mood/energy sparklines for the last 14 days (or custom) |
 | `/status` | Bar chart of open tasks per domain |
 | `/list [domain]` | Show open tasks, optionally filtered by domain |
 | `/done` | Pick a task to mark complete from a numbered list |
 | `/focus <domain> <text>` | Set next action on a domain note |
-| `/week` | Weekly digest — stats per domain + creates weekly note |
+| `/week` | Weekly digest — scores, themes + creates weekly note |
 | `/add <text>` | Explicit task capture |
 | `/journal <text>` | Save a note directly to today's daily note |
 | `/note` | Start a fleeting note session (text, voice, image, or link) |
@@ -312,6 +315,23 @@ Create `04 META/42 Agents/assistant/FLYNN.md` in your vault to give Flynn persis
 ```
 
 ## Changelog
+
+### v0.10 (2026-05-07)
+- `/trends [days]` — sleep/mood/energy sparklines for last 14 days (or custom), with anxiety-mention frequency
+- `/tomorrow <text>` — queue a task directly to tomorrow's Today's Focus, no routing
+- Evening nudge at 20:30: gentle reminder if the evening check-in section is still empty
+- Evening check-in moved to 20:00 (was 18:00 — matches actual usage pattern)
+- `/tasks` UX fix: no-args now shows current tasks without entering replace mode
+- Morning compact status now shows yesterday's focus completion instead of empty domain bar charts
+- Weekly digest adds 7-day score averages, anxiety frequency, and "what was weighing on you" excerpts from morning check-ins
+- Weekly note gains Check-in Trends table and What Was Weighing On Me section
+
+### v0.9 (2026-05-07)
+- Daily 3-task focus system: morning prompt after check-in asks for top 3, evening review shows completion status
+- `/tasks` — view or replace today's focus tasks inline or via session
+- Evening check-in rebuilt: shows live task status first, prompts carry-forward to tomorrow, then reflection
+- `get_focus_tasks`, `write_focus_tasks`, `carry_task_forward` — full focus task lifecycle
+- Daily note template gains `## Today's Focus` section above `## Today`
 
 ### v0.8 (2026-05-07)
 - Domain notes now found via glob search — works with any vault subfolder structure (e.g. Johnny Decimal `00 DOMAINS/01 Self/Self.md`)
