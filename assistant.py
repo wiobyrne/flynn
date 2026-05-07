@@ -153,7 +153,7 @@ async def classify_domain(text: str) -> str:
 
 # ── Vault Operations ──────────────────────────────────────────────────────────
 
-FLYNN_MD_PATH = VAULT / "04 META" / "42 Agents" / "assistant" / "FLYNN.md"
+FLYNN_MD_PATH = VAULT / "04 META" / "42 Agents" / "Flynn" / "FLYNN.md"
 
 
 def read_active_focus() -> str:
@@ -1086,7 +1086,7 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Planning & Pins ───────────────────────────────────────────────────────────
 
-PINS_PATH = VAULT / "04 META" / "42 Agents" / "Pins.md"
+PINS_PATH = VAULT / "04 META" / "42 Agents" / "Flynn" / "Pins.md"
 
 PLAN_PROMPT = """You are Flynn, a calm and opinionated executive-function aid helping Ian plan his day.
 
