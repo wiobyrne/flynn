@@ -9,7 +9,9 @@ Named after Flynn from Tron.
 - **Quick capture** — send any message and Flynn routes it to the right domain in your vault
 - **Intent detection** — reflections go to your daily note's Notes section; tasks go to Tasks Quick Add
 - **Date-aware capture** — "tomorrow I need to..." schedules to the right date automatically
-- **Fleeting notes** — `/note` captures text, voice (Whisper transcription), images, and links to your inbox
+- **Fleeting notes** — `/note` captures text, voice (Whisper transcription), images, and links to your fleeting inbox
+- **Morning planning** — `/plan` accepts a brain-dump and sorts it into today / later / waiting / not now using local AI
+- **Pin and resume** — `/pin` saves your current task context; `/resume` retrieves it when you return
 - **Structured check-ins** — morning and evening prompts with mood/sleep/energy tracking into frontmatter
 - **Mission alignment** — every check-in asks how today connects to your top-level goal
 - **Task management** — `/done`, `/list`, `/focus` to manage everything from your phone
@@ -27,7 +29,7 @@ assistant.py               HTTP API http://127.0.0.1:8765
     ↓ classifies via
 Ollama (local) → Claude API (fallback) → keywords (fallback)
     ↓ writes to
-daily note (Tasks Quick Add or Notes) + 01 CONSUME/📥 Inbox/ (fleeting)
+daily note (Tasks Quick Add or Notes) + 01 CONSUME/18 Fleeting/ (fleeting)
     ↓ surfaced by
 Domain notes (Tasks plugin) + Flynn.base (Obsidian Bases dashboard)
 ```
@@ -127,7 +129,7 @@ Repeat per-domain blocks for each of your five domains. Then embed the dashboard
 
 The Tasks plugin scans the entire vault at query time — any task Flynn writes anywhere with the right tag or date surfaces here automatically. You don't maintain it manually.
 
-Create `01 CONSUME/📥 Inbox/` — Flynn saves fleeting notes here.
+Create `01 CONSUME/18 Fleeting/` — Flynn saves fleeting notes here. You can name this folder differently; update `FLEETING_PATH` in `assistant.py` to match.
 
 Create daily notes at `03 CREATE/Journal/Daily/YYYY/MM/YYYY-MM-DD.md` — Flynn writes tasks, morning plans, and reflections here. Adjust the path in `config.yaml` if needed.
 
@@ -156,20 +158,49 @@ nohup venv/bin/python assistant.py > flynn.log 2>&1 &
 | `/add <text>` | Explicit task capture |
 | `/journal <text>` | Save a note directly to today's daily note |
 | `/note` | Start a fleeting note session (text, voice, image, or link) |
+| `/plan` | Morning brain-dump sort — AI organizes into today / later / waiting / not now |
+| `/pin` | Save current task context for later resumption |
+| `/resume` | Retrieve the most recent pin |
 | `/cancel` | Cancel the current capture session |
 | Any text | Auto-routed — task or reflection detected automatically |
 
 ## Fleeting notes
 
-`/note` turns Flynn into a local Google Keep. After sending `/note`, your next message is saved as a standalone fleeting note in `01 CONSUME/📥 Inbox/` using your vault's fleeting note template format.
+`/note` turns Flynn into a local Google Keep. After sending `/note`, your next message is saved as a standalone fleeting note in `01 CONSUME/18 Fleeting/` using your vault's fleeting note template format.
 
 Supported capture types:
 - **Text** — saved as-is
 - **Voice** — transcribed locally via Whisper, audio file kept alongside the note
 - **Image** — saved to inbox, embedded in the note with `![[filename]]`
-- **Link** — saved with `type: link` in frontmatter
+- **Link** — detected automatically and tagged in frontmatter
 
-Notes land as `YYYY-MM-DD HH-MM fleeting.md` and are ready for a later processing pass.
+Notes land as `YYYY-MM-DD HH-MM fleeting.md` with `state: inbox` frontmatter, ready for a later processing pass.
+
+## Morning planning
+
+`/plan` is a thinking tool, not just a sorter. Send it a brain-dump of everything on your mind. Flynn sends it to your local Ollama model (Claude API fallback if Ollama is unavailable) with a prompt that pushes back on overloaded lists.
+
+It returns exactly four sections:
+
+- **TOP 1–3 TODAY** — strictly 1–3 items, mission-aligned and realistic
+- **LATER THIS WEEK** — real commitments, not today
+- **WAITING / BLOCKED** — needs someone else or more info
+- **NOT NOW / DEFER** — mental noise, anxiety, low signal
+
+The top tasks are written as real tasks in your daily note. Waiting items get a `#waiting` tag. Not-now items are saved as a single reflection line. The full sort is saved to `## Morning Plan` in your daily note for reference.
+
+## Pin and resume
+
+`/pin` saves your current working context to `04 META/42 Agents/Pins.md`. Format:
+
+```
+Doing: what you're working on
+Stopped at: where you are right now
+Next: first action when you return
+Blocker: anything in the way (or none)
+```
+
+`/resume` retrieves the most recent pin. Useful before meetings, end of day, or any context switch.
 
 ## Local agent API
 
@@ -268,7 +299,7 @@ Local Ollama routing = $0. Claude API fallback uses the cheapest Haiku model onl
 
 ## FLYNN.md — persistent identity
 
-Create `04 META/🤖 Agents/assistant/FLYNN.md` in your vault to give Flynn persistent context. Flynn reads the `## Current Focus` section and uses it in every briefing.
+Create `04 META/42 Agents/assistant/FLYNN.md` in your vault to give Flynn persistent context. Flynn reads the `## Current Focus` section and uses it in every briefing. Adjust the path in `assistant.py` (`FLYNN_MD_PATH`) to match your vault structure.
 
 ```markdown
 ## Current Focus
@@ -281,6 +312,14 @@ Create `04 META/🤖 Agents/assistant/FLYNN.md` in your vault to give Flynn pers
 ```
 
 ## Changelog
+
+### v0.8 (2026-05-07)
+- Domain notes now found via glob search — works with any vault subfolder structure (e.g. Johnny Decimal `00 DOMAINS/01 Self/Self.md`)
+- Fleeting note frontmatter aligned with vault template: `state: inbox`, `categories: Notes`, no emoji in YAML
+- `/plan` now has Claude API fallback — works even when Ollama is unavailable
+- Daily note template no longer creates a dangling empty checkbox in Tasks Quick Add
+- `FLEETING_PATH` variable renamed from `INBOX_PATH` for clarity (`01 CONSUME/18 Fleeting/`)
+- `/plan`, `/pin`, `/resume` documented
 
 ### v0.7 (2026-04-20)
 - `/note` command: fleeting note capture — text, voice (Whisper), image, link

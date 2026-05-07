@@ -6,7 +6,7 @@ Flynn — Personal AI Assistant Bot
 - Morning check-in includes compact status; evening wrap-up at 18:00
 - AI routing: Ollama first, Claude API fallback, keyword fallback
 - Identity and focus read from FLYNN.md in vault
-- /note command: fleeting note capture (text, voice, image, link) → 01 CONSUME/📥 Inbox/
+- /note command: fleeting note capture (text, voice, image, link) → 01 CONSUME/18 Fleeting/
 """
 
 import os
@@ -61,8 +61,8 @@ NOTE_STATE: set[int] = set()        # chat_ids waiting for a fleeting note
 PLAN_STATE: set[int] = set()        # chat_ids waiting for a brain-dump
 PIN_STATE: set[int] = set()         # chat_ids waiting for a pin message
 
-INBOX_PATH = VAULT / "01 CONSUME" / "📥 Inbox"
-INBOX_PATH.mkdir(parents=True, exist_ok=True)
+FLEETING_PATH = VAULT / "01 CONSUME" / "18 Fleeting"
+FLEETING_PATH.mkdir(parents=True, exist_ok=True)
 
 _whisper_model: "WhisperModel | None" = None
 
@@ -151,7 +151,7 @@ async def classify_domain(text: str) -> str:
 
 # ── Vault Operations ──────────────────────────────────────────────────────────
 
-FLYNN_MD_PATH = VAULT / "04 META" / "🤖 Agents" / "assistant" / "FLYNN.md"
+FLYNN_MD_PATH = VAULT / "04 META" / "42 Agents" / "assistant" / "FLYNN.md"
 
 
 def read_active_focus() -> str:
@@ -222,10 +222,11 @@ def get_weekly_stats() -> dict:
 
 
 def read_domain_next_action(domain_id: str) -> str:
-    domain_file = VAULT / "00 DOMAINS" / f"{domain_id.capitalize()}.md"
-    if not domain_file.exists():
+    domain_name = domain_id.capitalize()
+    matches = list((VAULT / "00 DOMAINS").rglob(f"{domain_name}.md"))
+    if not matches:
         return ""
-    content = domain_file.read_text()
+    content = matches[0].read_text()
     match = re.search(r"^next_action:\s*[\"']?(.+?)[\"']?\s*$", content, re.MULTILINE)
     if match:
         return match.group(1).strip()
@@ -277,9 +278,11 @@ def mark_task_done(search_text: str) -> tuple[bool, str]:
 
 
 def update_domain_frontmatter(domain_id: str, field: str, value: str) -> bool:
-    domain_file = VAULT / "00 DOMAINS" / f"{domain_id.capitalize()}.md"
-    if not domain_file.exists():
+    domain_name = domain_id.capitalize()
+    matches = list((VAULT / "00 DOMAINS").rglob(f"{domain_name}.md"))
+    if not matches:
         return False
+    domain_file = matches[0]
     content = domain_file.read_text()
     today = date.today().isoformat()
     # Update the field
@@ -385,7 +388,6 @@ short mode
 ```
 
 ## Tasks Quick Add
-- [ ]
 
 ---
 
@@ -636,7 +638,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/week — weekly digest + create weekly note\n"
         "/add <text> — quick capture\n"
         "/journal <text> — save to today's notes\n"
-        "/note — fleeting note (text, voice, image, link → inbox)\n"
+        "/note — fleeting note (text, voice, image, link → 01 CONSUME/18 Fleeting)\n"
         "/plan — morning brain-dump sort\n"
         "/pin — save current task context for later\n"
         "/resume — retrieve last pin\n"
@@ -770,13 +772,13 @@ async def scheduled_weekly_digest(ctx) -> None:
 # ── Fleeting Notes ────────────────────────────────────────────────────────────
 
 def create_fleeting_note(content: str, note_type: str = "text", audio_file: str | None = None) -> Path:
-    """Write a fleeting note to the inbox using the vault template format."""
+    """Write a fleeting note to the 18 Fleeting staging bucket using the vault template format."""
     now = datetime.now(TIMEZONE)
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H:%M")
     safe_time = now.strftime("%H-%M")
     filename = f"{date_str} {safe_time} fleeting.md"
-    path = INBOX_PATH / filename
+    path = FLEETING_PATH / filename
 
     title = content[:60].strip().replace('"', "'")
     audio_line = f"\n**Audio:** [[{audio_file}]]" if audio_file else ""
@@ -784,19 +786,20 @@ def create_fleeting_note(content: str, note_type: str = "text", audio_file: str 
     body = (
         f"---\n"
         f'title: "{title}"\n'
+        f"created: {date_str}\n"
+        f"last_updated: {date_str}\n"
+        f"owner: human\n"
+        f"state: inbox\n"
         f"tags: []\n"
-        f"categories: Notes\n"
-        f"status: 🌱_seed\n"
+        f"categories:\n"
+        f"  - Notes\n"
         f"dg-publish: false\n"
-        f'date: "{date_str}, {time_str}"\n'
-        f"shelf: draft\n"
-        f"type: {note_type}\n"
         f"---\n\n"
         f"## Quick Note\n"
         f"{content}{audio_line}\n\n"
         f"## Context (Optional)\n\n"
         f"## Next Steps (Optional)\n"
-        f"- [ ] Process this into a seed/plant note.\n"
+        f"- [ ] Process or discard.\n"
     )
     path.write_text(body)
     return path
@@ -847,7 +850,7 @@ async def handle_note_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
 
     now = datetime.now(TIMEZONE)
     audio_filename = now.strftime("%Y-%m-%d %H-%M") + " audio.ogg"
-    audio_path = INBOX_PATH / audio_filename
+    audio_path = FLEETING_PATH / audio_filename
 
     voice = update.message.voice
     tg_file = await ctx.bot.get_file(voice.file_id)
@@ -887,7 +890,7 @@ async def handle_note_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> N
 
     now = datetime.now(TIMEZONE)
     image_filename = now.strftime("%Y-%m-%d %H-%M") + " image.jpg"
-    image_path = INBOX_PATH / image_filename
+    image_path = FLEETING_PATH / image_filename
 
     photo = update.message.photo[-1]  # largest size
     tg_file = await ctx.bot.get_file(photo.file_id)
@@ -951,7 +954,7 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Planning & Pins ───────────────────────────────────────────────────────────
 
-PINS_PATH = VAULT / "04 META" / "🤖 Agents" / "Pins.md"
+PINS_PATH = VAULT / "04 META" / "42 Agents" / "Pins.md"
 
 PLAN_PROMPT = """You are Flynn, a calm and opinionated executive-function aid helping Ian plan his day.
 
@@ -993,8 +996,10 @@ Return only the four sections, the FOCUS line, and an optional single question. 
 
 
 async def run_plan_sort(text: str) -> str:
-    """Send brain-dump to Ollama for sorting. Returns formatted sort or error."""
+    """Send brain-dump to Ollama for sorting, with Claude API fallback."""
     prompt = PLAN_PROMPT.format(text=text)
+
+    # 1. Try Ollama
     try:
         async with httpx.AsyncClient(timeout=45) as client:
             r = await client.post(
@@ -1004,7 +1009,29 @@ async def run_plan_sort(text: str) -> str:
             return r.json().get("response", "").strip()
     except Exception as e:
         log.warning(f"Ollama plan sort failed: {e}")
-        return "⚠️ Ollama unavailable — try again or send tasks manually with /add."
+
+    # 2. Try Claude API (Haiku — cheap, fast)
+    if ANTHROPIC_API_KEY:
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": ANTHROPIC_API_KEY,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_tokens": 800,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+                return r.json()["content"][0]["text"].strip()
+        except Exception as e:
+            log.warning(f"Claude plan sort failed: {e}")
+
+    return "⚠️ Ollama and Claude API both unavailable — try again or send tasks manually with /add."
 
 
 def extract_top_tasks(sort_result: str) -> list[str]:
@@ -1396,7 +1423,7 @@ async def _capture(update: Update, text: str) -> None:
 #
 # type "task"     → appended to today's daily note, domain-tagged
 # type "note"     → saved to today's ## Notes section (reflection)
-# type "fleeting" → new fleeting note in 01 CONSUME/📥 Inbox/
+# type "fleeting" → new fleeting note in 01 CONSUME/18 Fleeting/
 # domain          → optional override; skips AI classification when provided
 # notify          → optional bool, sends Telegram message to you when true
 
