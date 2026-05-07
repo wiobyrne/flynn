@@ -55,11 +55,13 @@ API_PORT = int(config.get("api_port", 8765))  # local agent API
 API_SECRET = os.getenv("FLYNN_API_SECRET", "")  # optional shared secret
 
 TIMEZONE = ZoneInfo(config.get("timezone", "America/New_York"))
-CHECKIN_STATE: dict[int, str] = {}  # chat_id → "morning" | "evening"
-DONE_STATE: dict[int, list] = {}   # chat_id → list of (file, line_num, task_text)
-NOTE_STATE: set[int] = set()        # chat_ids waiting for a fleeting note
-PLAN_STATE: set[int] = set()        # chat_ids waiting for a brain-dump
-PIN_STATE: set[int] = set()         # chat_ids waiting for a pin message
+CHECKIN_STATE: dict[int, str] = {}           # chat_id → "Morning" | "Evening"
+DONE_STATE: dict[int, list] = {}             # chat_id → [(file, line_num, task_text)]
+NOTE_STATE: set[int] = set()                 # chat_ids waiting for a fleeting note
+PLAN_STATE: set[int] = set()                 # chat_ids waiting for a brain-dump
+PIN_STATE: set[int] = set()                  # chat_ids waiting for a pin message
+MORNING_TASKS_STATE: set[int] = set()        # chat_ids waiting for today's 3 tasks
+EVENING_REVIEW_STATE: dict[int, list] = {}   # chat_id → [(task_text, is_done)]
 
 FLEETING_PATH = VAULT / "01 CONSUME" / "18 Fleeting"
 FLEETING_PATH.mkdir(parents=True, exist_ok=True)
@@ -297,6 +299,78 @@ def update_domain_frontmatter(domain_id: str, field: str, value: str) -> bool:
     return True
 
 
+# ── Daily Focus Tasks ─────────────────────────────────────────────────────────
+
+def parse_task_list(text: str) -> list[str]:
+    """Parse 1–3 tasks from a freeform message (numbered list, bullets, or plain lines)."""
+    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+    tasks = []
+    for line in lines:
+        clean = re.sub(r'^[\d]+[.)]\s*|^[-•*]\s*', '', line).strip()
+        if clean and len(clean) > 2:
+            tasks.append(clean)
+    if not tasks:
+        parts = re.split(r'[,;]\s+', text.strip())
+        tasks = [p.strip() for p in parts if p.strip() and len(p.strip()) > 2]
+    return tasks[:3]
+
+
+def write_focus_tasks(tasks: list[str], d: date) -> None:
+    """Write (or replace) the Today's Focus task list in the daily note."""
+    path = create_daily_note_if_missing(d)
+    content = path.read_text()
+    task_block = "".join(f"- [ ] {t}\n" for t in tasks)
+    marker = "## Today's Focus\n"
+    if marker in content:
+        content = re.sub(
+            r"(## Today's Focus\n)(.*?)(?=\n## |\Z)",
+            rf"\g<1>{task_block}",
+            content,
+            flags=re.DOTALL,
+        )
+    else:
+        today_marker = "## Today\n"
+        if today_marker in content:
+            content = content.replace(today_marker, f"{marker}{task_block}\n{today_marker}", 1)
+        else:
+            content += f"\n{marker}{task_block}"
+    path.write_text(content)
+
+
+def get_focus_tasks(d: date) -> list[tuple[str, bool]]:
+    """Return (task_text, is_done) pairs from the Today's Focus section."""
+    path = get_daily_note_path(d)
+    if not path.exists():
+        return []
+    content = path.read_text()
+    match = re.search(r"## Today's Focus\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
+    if not match:
+        return []
+    tasks = []
+    for line in match.group(1).splitlines():
+        m = re.match(r"^- \[([ x])\] (.+)$", line.strip())
+        if m:
+            tasks.append((m.group(2).strip(), m.group(1) == "x"))
+    return tasks
+
+
+def carry_task_forward(task_text: str, to_date: date) -> None:
+    """Append a task to the Today's Focus section of a future daily note."""
+    path = create_daily_note_if_missing(to_date)
+    content = path.read_text()
+    task_line = f"- [ ] {task_text}\n"
+    marker = "## Today's Focus\n"
+    if marker in content:
+        content = content.replace(marker, marker + task_line, 1)
+    else:
+        today_marker = "## Today\n"
+        if today_marker in content:
+            content = content.replace(today_marker, f"{marker}{task_line}\n{today_marker}", 1)
+        else:
+            content += f"\n{marker}{task_line}"
+    path.write_text(content)
+
+
 # ── Intent Detection ─────────────────────────────────────────────────────────
 
 _REFLECTION_PATTERNS = [
@@ -378,6 +452,9 @@ week: {week_str}
 ---
 
 # {date_str}
+
+## Today's Focus
+
 
 ## Today
 
@@ -632,6 +709,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "👋 Assistant ready.\n\n"
         "/today — morning briefing + overdue flags\n"
         "/status — domain task counts\n"
+        "/tasks — set or view today's top 3 focus tasks\n"
+        "/today — briefing with focus tasks + domain status\n"
         "/list [domain] — show open tasks\n"
         "/done — mark a task complete (pick from list)\n"
         "/focus <domain> <text> — set domain next action\n"
@@ -940,6 +1019,12 @@ async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if chat_id in PIN_STATE:
         PIN_STATE.discard(chat_id)
         cleared.append("pin")
+    if chat_id in MORNING_TASKS_STATE:
+        MORNING_TASKS_STATE.discard(chat_id)
+        cleared.append("morning tasks")
+    if chat_id in EVENING_REVIEW_STATE:
+        del EVENING_REVIEW_STATE[chat_id]
+        cleared.append("evening review")
     if chat_id in CHECKIN_STATE:
         del CHECKIN_STATE[chat_id]
         cleared.append("check-in")
@@ -1240,6 +1325,43 @@ async def cmd_add(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await _capture(update, text)
 
 
+async def cmd_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Set or view today's focus tasks. /tasks with no args shows current; with args sets inline."""
+    if not is_allowed(update):
+        return
+    chat_id = update.effective_chat.id
+    inline = " ".join(ctx.args).strip()
+
+    if not inline:
+        # Show current tasks or start capture session
+        current = get_focus_tasks(date.today())
+        if current:
+            lines = ["📋 *Today's focus:*\n"]
+            for i, (task_text, is_done) in enumerate(current, 1):
+                icon = "✅" if is_done else "⬜"
+                lines.append(f"{icon} {i}. {task_text}")
+            lines.append("\n_Send new tasks to replace, or /cancel to keep these._")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        else:
+            await update.message.reply_text(
+                "📌 *What are your top 3 for today?*\n\nSend them one per line.",
+                parse_mode="Markdown",
+            )
+        MORNING_TASKS_STATE.add(chat_id)
+        return
+
+    tasks = parse_task_list(inline)
+    if not tasks:
+        await update.message.reply_text("Couldn't parse tasks. Try: /tasks grade papers, write newsletter")
+        return
+    write_focus_tasks(tasks, date.today())
+    task_lines = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(tasks))
+    await update.message.reply_text(
+        f"✓ *Today's focus ({len(tasks)}):*\n{task_lines}",
+        parse_mode="Markdown",
+    )
+
+
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
@@ -1280,12 +1402,69 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text("Reply with a number. Use /done to try again.")
         return
 
-    # Check-in response takes priority
+    # Evening task review response
+    if chat_id in EVENING_REVIEW_STATE:
+        tasks = EVENING_REVIEW_STATE.pop(chat_id)
+        open_items = [(i + 1, t) for i, (t, done) in enumerate(tasks) if not done]
+        tomorrow = date.today() + timedelta(days=1)
+        text_lower = text.strip().lower()
+
+        if text_lower in ("skip", "done", "all done", "none", "no"):
+            carried = []
+        elif text_lower == "all":
+            carried = [t for _, t in open_items]
+        else:
+            nums = set()
+            for tok in re.findall(r'\d+', text_lower):
+                n = int(tok)
+                if 1 <= n <= len(tasks):
+                    nums.add(n)
+            carried = [t for i, t in open_items if i in nums]
+
+        for task in carried:
+            carry_task_forward(task, tomorrow)
+
+        if carried:
+            lines = "\n".join(f"  → {t}" for t in carried)
+            await update.message.reply_text(f"✓ Carrying to tomorrow:\n{lines}", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("✓ Nothing carried forward.", parse_mode="Markdown")
+
+        # Now send the evening reflection
+        CHECKIN_STATE[chat_id] = "Evening"
+        await update.message.reply_text(EVENING_PROMPT, parse_mode="Markdown")
+        return
+
+    # Check-in response
     if chat_id in CHECKIN_STATE:
         section = CHECKIN_STATE.pop(chat_id)
         write_checkin_to_note(date.today(), section, text)
         await update.message.reply_text(
             f"✓ Saved to *{section} check-in* in today's note.",
+            parse_mode="Markdown",
+        )
+        # After morning check-in, prompt for today's 3 tasks
+        if section == "Morning":
+            MORNING_TASKS_STATE.add(chat_id)
+            await update.message.reply_text(
+                "📌 *What are your top 3 for today?*\n\nSend them one per line — no structure needed.",
+                parse_mode="Markdown",
+            )
+        return
+
+    # Morning tasks response
+    if chat_id in MORNING_TASKS_STATE:
+        MORNING_TASKS_STATE.discard(chat_id)
+        tasks = parse_task_list(text)
+        if not tasks:
+            await update.message.reply_text(
+                "Couldn't parse tasks. Try one per line:\n\n1. First task\n2. Second task\n3. Third task"
+            )
+            return
+        write_focus_tasks(tasks, date.today())
+        task_lines = "\n".join(f"  {i + 1}. {t}" for i, t in enumerate(tasks))
+        await update.message.reply_text(
+            f"✓ *Today's focus ({len(tasks)}):*\n{task_lines}\n\n_Check them off in Obsidian or use /done as you go._",
             parse_mode="Markdown",
         )
         return
@@ -1319,21 +1498,34 @@ def build_briefing_text() -> str:
     focus = read_active_focus()
     counts = count_open_tasks()
     overdue = get_overdue_tasks()
+    focus_tasks = get_focus_tasks(date.today())
 
-    lines = []
+    # Today's Focus block
+    if focus_tasks:
+        task_lines = []
+        for task_text, is_done in focus_tasks:
+            icon = "✅" if is_done else "⬜"
+            task_lines.append(f"{icon} {task_text}")
+        focus_block = "*Today's focus:*\n" + "\n".join(task_lines)
+    else:
+        focus_block = "_No focus tasks set — use /tasks to add up to 3._"
+
+    domain_lines = []
     for d in config["domains"]:
         count = counts.get(d["id"], 0)
         next_action = read_domain_next_action(d["id"])
-        status = f"{count} open" if count else "clear"
-        line = f"{d['emoji']} *{d['label']}* — {status}"
+        line = f"{d['emoji']} *{d['label']}*"
         if next_action:
             line += f"\n  → _{next_action}_"
-        lines.append(line)
+        elif count:
+            line += f" — {count} open"
+        domain_lines.append(line)
 
     briefing = (
         f"📋 *{today_str}*\n\n"
-        f"*Focus:*\n{focus}\n\n"
-        f"*Domains:*\n" + "\n\n".join(lines)
+        f"{focus_block}\n\n"
+        f"*FLYNN focus:*\n{focus}\n\n"
+        f"*Domains:*\n" + "\n\n".join(domain_lines)
     )
 
     if overdue:
@@ -1387,12 +1579,51 @@ async def scheduled_morning_checkin(ctx) -> None:
 async def scheduled_evening_checkin(ctx) -> None:
     if not ALLOWED_CHAT_ID:
         return
-    CHECKIN_STATE[int(ALLOWED_CHAT_ID)] = "Evening"
-    await ctx.bot.send_message(
-        chat_id=int(ALLOWED_CHAT_ID),
-        text=EVENING_PROMPT,
-        parse_mode="Markdown",
-    )
+    chat_id = int(ALLOWED_CHAT_ID)
+    focus_tasks = get_focus_tasks(date.today())
+
+    if focus_tasks:
+        done = [(t, d) for t, d in focus_tasks if d]
+        open_tasks = [(t, d) for t, d in focus_tasks if not d]
+
+        lines = ["📋 *Today's focus — how'd it go?*\n"]
+        for i, (task_text, is_done) in enumerate(focus_tasks, 1):
+            icon = "✅" if is_done else "⬜"
+            lines.append(f"{icon} {i}. {task_text}")
+
+        if open_tasks:
+            lines.append(
+                f"\n_{len(open_tasks)} still open. Reply with numbers to carry to tomorrow "
+                f"(e.g. \"1 3\"), \"all\", or \"skip\"._"
+            )
+            EVENING_REVIEW_STATE[chat_id] = focus_tasks
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text="\n".join(lines),
+                parse_mode="Markdown",
+            )
+            # Reflection prompt will be sent after the user responds to task review
+        else:
+            lines.append("\n✨ _All done — great day!_")
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text="\n".join(lines),
+                parse_mode="Markdown",
+            )
+            CHECKIN_STATE[chat_id] = "Evening"
+            await ctx.bot.send_message(
+                chat_id=chat_id,
+                text=EVENING_PROMPT,
+                parse_mode="Markdown",
+            )
+    else:
+        # No focus tasks set today — go straight to reflection
+        CHECKIN_STATE[chat_id] = "Evening"
+        await ctx.bot.send_message(
+            chat_id=chat_id,
+            text=EVENING_PROMPT,
+            parse_mode="Markdown",
+        )
 
 
 async def _capture(update: Update, text: str) -> None:
@@ -1549,6 +1780,7 @@ async def run() -> None:
 
     tg_app.add_handler(CommandHandler("start", cmd_start))
     tg_app.add_handler(CommandHandler("today", cmd_today))
+    tg_app.add_handler(CommandHandler("tasks", cmd_tasks))
     tg_app.add_handler(CommandHandler("status", cmd_status))
     tg_app.add_handler(CommandHandler("list", cmd_list))
     tg_app.add_handler(CommandHandler("done", cmd_done))
