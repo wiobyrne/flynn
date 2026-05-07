@@ -22,7 +22,10 @@ checkins:
     time: "07:00"
     enabled: true
   evening:
-    time: "18:00"
+    time: "20:00"
+    enabled: true
+  evening_nudge:
+    time: "20:30"
     enabled: true
 
 ollama:

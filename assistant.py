@@ -505,6 +505,9 @@ def write_checkin_to_note(d: date, section: str, response: str) -> None:
         update_daily_note_frontmatter(d, scores)
 
 
+_SPARK_MAP = {1: "▁", 2: "▃", 3: "▄", 4: "▆", 5: "█"}
+
+
 def write_weekly_note(stats: dict, overdue: list) -> Path:
     """Create or update the weekly note for the current week."""
     today = date.today()
@@ -535,6 +538,24 @@ def write_weekly_note(stats: dict, overdue: list) -> Path:
     else:
         overdue_lines = "_None — great week!_"
 
+    # Check-in themes
+    themes = get_weekly_checkin_themes()
+    themes_block = "\n".join(f"- {t}" for t in themes) if themes else "_No check-ins recorded._"
+
+    # Trends
+    trends = get_checkin_trends(7)
+    trend_lines = []
+    for field, label in [("sleep", "Sleep"), ("mood", "Mood"), ("energy", "Energy")]:
+        scores = trends[field]
+        if scores:
+            avg = sum(v for _, v in scores) / len(scores)
+            spark = "".join(_SPARK_MAP.get(v, "?") for _, v in scores)
+            trend_lines.append(f"| {label} | {spark} | {avg:.1f} |")
+    trends_block = (
+        "| Metric | Week | Avg |\n|--------|------|-----|\n" + "\n".join(trend_lines)
+        if trend_lines else "_No score data this week._"
+    )
+
     content = f"""---
 tags:
   - weekly-note
@@ -543,6 +564,14 @@ date_range: {monday.isoformat()} to {sunday.isoformat()}
 ---
 
 # {week_str} ({monday.strftime("%b %-d")} – {sunday.strftime("%b %-d, %Y")})
+
+## Check-in Trends
+
+{trends_block}
+
+## What Was Weighing On Me
+
+{themes_block}
 
 ## Domain Summary
 
@@ -571,16 +600,33 @@ _What do I want to carry into next week?_
 
 def build_weekly_text(stats: dict, overdue: list) -> str:
     """Build the Telegram summary for the weekly digest."""
-    today = date.today()
-    monday = today - timedelta(days=today.weekday())
-    week_str = today.strftime("%G-W%V")
-
+    week_str = date.today().strftime("%G-W%V")
     lines = [f"📊 *Week in review — {week_str}*\n"]
+
     for d in config["domains"]:
         s = stats.get(d["id"], {})
         captured = s.get("captured", 0)
         completed = s.get("completed", 0)
-        lines.append(f"{d['emoji']} *{d['label']}* — {captured} captured, {completed} done")
+        if captured or completed:
+            lines.append(f"{d['emoji']} *{d['label']}* — {captured} captured, {completed} done")
+
+    trends = get_checkin_trends(7)
+    trend_parts = []
+    for field, label in [("sleep", "sleep"), ("mood", "mood"), ("energy", "energy")]:
+        scores = trends[field]
+        if scores:
+            avg = sum(v for _, v in scores) / len(scores)
+            trend_parts.append(f"{label} {avg:.1f}")
+    if trend_parts:
+        lines.append(f"\n📈 *Avg scores:* {' · '.join(trend_parts)}")
+    if trends["anxiety_count"] > 0 and trends["days_checked"] > 0:
+        pct = int(trends["anxiety_count"] / trends["days_checked"] * 100)
+        lines.append(f"⚡ Anxiety noted {trends['anxiety_count']}x ({pct}%)")
+
+    themes = get_weekly_checkin_themes()
+    if themes:
+        lines.append("\n🧠 *What was weighing on you:*")
+        lines.extend(themes)
 
     if overdue:
         lines.append(f"\n⚠️ *{len(overdue)} overdue task(s)* — review in this week's note")
@@ -707,17 +753,18 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "👋 Assistant ready.\n\n"
-        "/today — morning briefing + overdue flags\n"
-        "/status — domain task counts\n"
-        "/tasks — set or view today's top 3 focus tasks\n"
         "/today — briefing with focus tasks + domain status\n"
+        "/tasks — view or set today's top 3 focus tasks\n"
+        "/tomorrow <text> — queue a task for tomorrow\n"
+        "/trends [days] — sleep/mood/energy sparklines (default 14d)\n"
+        "/status — domain task bar chart\n"
         "/list [domain] — show open tasks\n"
         "/done — mark a task complete (pick from list)\n"
         "/focus <domain> <text> — set domain next action\n"
         "/week — weekly digest + create weekly note\n"
         "/add <text> — quick capture\n"
         "/journal <text> — save to today's notes\n"
-        "/note — fleeting note (text, voice, image, link → 01 CONSUME/18 Fleeting)\n"
+        "/note — fleeting note (text, voice, image, link)\n"
         "/plan — morning brain-dump sort\n"
         "/pin — save current task context for later\n"
         "/resume — retrieve last pin\n"
@@ -1333,21 +1380,22 @@ async def cmd_tasks(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     inline = " ".join(ctx.args).strip()
 
     if not inline:
-        # Show current tasks or start capture session
         current = get_focus_tasks(date.today())
         if current:
+            # Just show — don't enter replace mode
             lines = ["📋 *Today's focus:*\n"]
             for i, (task_text, is_done) in enumerate(current, 1):
                 icon = "✅" if is_done else "⬜"
                 lines.append(f"{icon} {i}. {task_text}")
-            lines.append("\n_Send new tasks to replace, or /cancel to keep these._")
+            lines.append("\n_/tasks <text> to replace · /tomorrow <text> to queue for tomorrow_")
             await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
         else:
+            # No tasks yet — start capture
+            MORNING_TASKS_STATE.add(chat_id)
             await update.message.reply_text(
                 "📌 *What are your top 3 for today?*\n\nSend them one per line.",
                 parse_mode="Markdown",
             )
-        MORNING_TASKS_STATE.add(chat_id)
         return
 
     tasks = parse_task_list(inline)
@@ -1478,18 +1526,145 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def build_compact_status() -> str:
-    """Two-line status for the combined morning message."""
-    counts = count_open_tasks()
-    overdue = get_overdue_tasks()
-    total = sum(counts.values())
-    bars = []
-    for d in config["domains"]:
-        count = counts.get(d["id"], 0)
-        filled = min(count, 3)
-        bar = d["emoji"] + "█" * filled + "░" * (3 - filled)
-        bars.append(bar)
-    overdue_str = f" · {len(overdue)} overdue ⚠️" if overdue else ""
-    return f"{total} open{overdue_str}\n" + "  ".join(bars)
+    """Morning status: yesterday's focus completion — fast, reads one file."""
+    yesterday = date.today() - timedelta(days=1)
+    tasks = get_focus_tasks(yesterday)
+    if not tasks:
+        return "New day — no focus tasks from yesterday."
+    done_count = sum(1 for _, done in tasks if done)
+    total_count = len(tasks)
+    if done_count == total_count:
+        return f"Yesterday: {done_count}/{total_count} ✅"
+    open_tasks = [t for t, done in tasks if not done]
+    preview = ", ".join(t[:28] for t in open_tasks[:2])
+    if len(open_tasks) > 2:
+        preview += f" +{len(open_tasks) - 2}"
+    return f"Yesterday: {done_count}/{total_count} done · open: {preview}"
+
+
+def get_checkin_trends(days: int = 14) -> dict:
+    """Scan last N daily notes for sleep/mood/energy scores and anxiety mentions."""
+    today = date.today()
+    result: dict = {"sleep": [], "mood": [], "energy": [], "anxiety_count": 0, "days_checked": 0}
+    for i in range(days - 1, -1, -1):
+        d = today - timedelta(days=i)
+        path = get_daily_note_path(d)
+        if not path.exists():
+            continue
+        result["days_checked"] += 1
+        content = path.read_text()
+        if content.startswith("---"):
+            end = content.find("---", 3)
+            if end != -1:
+                fm = yaml.safe_load(content[3:end]) or {}
+                for field in ("sleep", "mood", "energy"):
+                    val = fm.get(field)
+                    if val is not None:
+                        try:
+                            result[field].append((d, int(val)))
+                        except (ValueError, TypeError):
+                            pass
+        m = re.search(r"## Morning Check-in\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
+        if m and re.search(r"anxiet|anxious|worried|anxiety", m.group(1), re.IGNORECASE):
+            result["anxiety_count"] += 1
+    return result
+
+
+def build_trends_text(data: dict, days: int = 14) -> str:
+    checked = data["days_checked"]
+    lines = [f"📈 *Trends — last {checked} days*\n"]
+    for field, label in [("sleep", "Sleep"), ("mood", "Mood  "), ("energy", "Energy")]:
+        scores = data[field]
+        if scores:
+            vals = [v for _, v in scores]
+            avg = sum(vals) / len(vals)
+            spark = "".join(_SPARK_MAP.get(v, "?") for _, v in scores)
+            lines.append(f"`{label}` {spark}  avg {avg:.1f}")
+        else:
+            lines.append(f"`{label}` — no data yet")
+    if checked > 0 and data["anxiety_count"] > 0:
+        pct = int(data["anxiety_count"] / checked * 100)
+        lines.append(
+            f"\n⚡ *Anxiety noted* in {data['anxiety_count']}/{checked} morning check-ins ({pct}%)"
+        )
+    return "\n".join(lines)
+
+
+async def cmd_trends(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show sleep/mood/energy sparklines for the last 14 days."""
+    if not is_allowed(update):
+        return
+    days = 14
+    if ctx.args:
+        try:
+            days = int(ctx.args[0])
+        except ValueError:
+            pass
+    data = get_checkin_trends(days)
+    await update.message.reply_text(build_trends_text(data, days), parse_mode="Markdown")
+
+
+async def cmd_tomorrow(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Queue a task directly to tomorrow's Today's Focus — no routing."""
+    if not is_allowed(update):
+        return
+    text = " ".join(ctx.args).strip()
+    if not text:
+        await update.message.reply_text("Usage: /tomorrow <task text>")
+        return
+    tomorrow = date.today() + timedelta(days=1)
+    carry_task_forward(text, tomorrow)
+    await update.message.reply_text(
+        f"✓ Queued for tomorrow:\n_{text}_",
+        parse_mode="Markdown",
+    )
+
+
+async def scheduled_evening_nudge(ctx) -> None:
+    """Send a gentle nudge if evening check-in is still empty at nudge time."""
+    if not ALLOWED_CHAT_ID:
+        return
+    chat_id = int(ALLOWED_CHAT_ID)
+    if chat_id in CHECKIN_STATE or chat_id in EVENING_REVIEW_STATE:
+        return
+    path = get_daily_note_path(date.today())
+    if not path.exists():
+        return
+    content = path.read_text()
+    m = re.search(r"## Evening Check-in\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
+    if m and m.group(1).strip():
+        return  # already filled in
+    await ctx.bot.send_message(
+        chat_id=chat_id,
+        text="🌙 Still time for a quick evening check-in — or /cancel to skip tonight.",
+        parse_mode="Markdown",
+    )
+
+
+def get_weekly_checkin_themes() -> list[str]:
+    """Collect this week's 'weighing on you' lines from morning check-ins."""
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    entries = []
+    for i in range(7):
+        d = monday + timedelta(days=i)
+        if d > today:
+            break
+        path = get_daily_note_path(d)
+        if not path.exists():
+            continue
+        content = path.read_text()
+        m = re.search(r"## Morning Check-in\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
+        if not m or not m.group(1).strip():
+            continue
+        # Find the "weighing on you" answer — usually second paragraph/line
+        checkin_text = m.group(1).strip()
+        lines = [l.strip() for l in checkin_text.splitlines() if l.strip()]
+        if len(lines) >= 2:
+            entries.append(f"*{d.strftime('%a')}:* {lines[1][:120]}")
+        elif lines:
+            entries.append(f"*{d.strftime('%a')}:* {lines[0][:120]}")
+    return entries
 
 
 def build_briefing_text() -> str:
@@ -1781,6 +1956,8 @@ async def run() -> None:
     tg_app.add_handler(CommandHandler("start", cmd_start))
     tg_app.add_handler(CommandHandler("today", cmd_today))
     tg_app.add_handler(CommandHandler("tasks", cmd_tasks))
+    tg_app.add_handler(CommandHandler("tomorrow", cmd_tomorrow))
+    tg_app.add_handler(CommandHandler("trends", cmd_trends))
     tg_app.add_handler(CommandHandler("status", cmd_status))
     tg_app.add_handler(CommandHandler("list", cmd_list))
     tg_app.add_handler(CommandHandler("done", cmd_done))
@@ -1829,6 +2006,16 @@ async def run() -> None:
             name="evening_checkin",
         )
         log.info(f"Evening check-in scheduled at {h:02d}:{m:02d} {config.get('timezone')}")
+
+    nudge_cfg = checkins.get("evening_nudge", {})
+    if nudge_cfg.get("enabled", False):
+        h, m = map(int, nudge_cfg["time"].split(":"))
+        jq.run_daily(
+            scheduled_evening_nudge,
+            time=dtime(h, m, tzinfo=TIMEZONE),
+            name="evening_nudge",
+        )
+        log.info(f"Evening nudge scheduled at {h:02d}:{m:02d} {config.get('timezone')}")
 
     # Weekly digest — runs daily, fires only on Fridays
     weekly_cfg = config.get("weekly", {})
