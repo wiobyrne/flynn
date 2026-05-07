@@ -194,7 +194,7 @@ The top tasks are written as real tasks in your daily note. Waiting items get a 
 
 ## Pin and resume
 
-`/pin` saves your current working context to `04 META/42 Agents/Pins.md`. Format:
+`/pin` saves your current working context to `04 META/42 Agents/Flynn/Pins.md`. Format:
 
 ```
 Doing: what you're working on
@@ -237,6 +237,15 @@ curl -X POST http://127.0.0.1:8765/capture \
 
 Set `FLYNN_API_SECRET` in `.env` to require authentication. Leave blank to skip.
 
+## Daily focus tasks
+
+Each morning, after the check-in, Flynn asks: *What are your top 3 for today?* Your reply is written as a `## Today's Focus` task list in that day's daily note.
+
+During the day you can check tasks off directly in Obsidian. At the evening check-in Flynn reads the live state and shows you what's done and what's still open.
+
+- `/tasks` — view today's focus; `/tasks <text>` to set inline
+- `/tomorrow <text>` — queue a task to tomorrow's focus without routing
+
 ## Check-ins
 
 Flynn sends structured check-ins at configurable times.
@@ -248,14 +257,39 @@ Flynn sends structured check-ins at configurable times.
 4. What are you working on today?
 5. How does today connect to your mission?
 
-**Evening (default 6:00pm):**
+After you reply, Flynn prompts for today's top 3 tasks and writes them to `## Today's Focus` in the daily note.
+
+**Evening (default 8:00pm):**
+
+Flynn first shows your focus tasks with completion status and asks which open ones to carry to tomorrow. Reply with numbers (`1 3`), `all`, or `skip`. After carry-forward is handled, Flynn sends the reflection prompt:
+
 1. Energy (1–5)
 2. Wins — what went well?
 3. Friction — what was hard?
 4. Tomorrow — one thing to carry forward
 5. Mission check — did today's work lead back to the sentence?
 
-Numeric scores are parsed and written into the daily note's YAML frontmatter (`sleep`, `mood`, `energy`) so you can query trends across your vault over time.
+**Evening nudge (default 8:30pm):**
+
+If the evening check-in section is still empty, Flynn sends one gentle reminder and then goes quiet.
+
+Numeric scores are parsed and written into the daily note's YAML frontmatter (`sleep`, `mood`, `energy`) so you can query trends with `/trends`.
+
+## Trends
+
+`/trends [days]` shows sparkline charts of your sleep, mood, and energy scores for the last 14 days (or a custom number). It also reports how often the word "anxiety" or "anxious" appears in your morning check-ins over that period.
+
+```
+📈 Trends — last 14 days
+
+Sleep  ▄▄▃▄▆▄▄▃▄▄▃▄▄▄  avg 3.6
+Mood   ▄▄▄▆▄▄▃▄▄▆▄▄▃▄  avg 3.7
+Energy ▄▃▄▄▄▆▄▃▄▄▄▄▃▄  avg 3.5
+
+⚡ Anxiety noted in 9/14 morning check-ins (64%)
+```
+
+Data comes from frontmatter scores in daily notes — no separate database required.
 
 ## Mission alignment
 
@@ -274,7 +308,10 @@ checkins:
     time: "07:00"
     enabled: true
   evening:
-    time: "18:00"
+    time: "20:00"
+    enabled: true
+  evening_nudge:
+    time: "20:30"
     enabled: true
 
 ollama:
