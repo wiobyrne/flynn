@@ -302,7 +302,7 @@ Local Ollama routing = $0. Claude API fallback uses the cheapest Haiku model onl
 
 ## FLYNN.md — persistent identity
 
-Create `04 META/42 Agents/assistant/FLYNN.md` in your vault to give Flynn persistent context. Flynn reads the `## Current Focus` section and uses it in every briefing. Adjust the path in `assistant.py` (`FLYNN_MD_PATH`) to match your vault structure.
+Create `04 META/42 Agents/Flynn/FLYNN.md` in your vault to give Flynn persistent context. Flynn reads the `## Current Focus` section and uses it in every briefing. Adjust the path in `assistant.py` (`FLYNN_MD_PATH`) to match your vault structure.
 
 ```markdown
 ## Current Focus
